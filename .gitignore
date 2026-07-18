@@ -1,0 +1,21 @@
+# Build
+gguf2bin2
+gguf2bin2.exe
+gguf2bin2_*.exe
+*.o
+src/*.o
+tiny_test.g2bx
+_check_tiny.g2bx
+*.g2bx.cache
+
+# Model weights (large binaries)
+*.gguf
+*.g2bx
+!tiny.g2bx
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
