@@ -88,25 +88,39 @@ void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb = n/32;
   #pragma omp parallel for schedule(static)
   for(i32 i=0;i<d;i++){
-    const u8 *row0 = w + (size_t)i*(size_t)nb*34;
+    const u8 *row = w + (size_t)i*(size_t)nb*34;
     __m256 a0=_mm256_setzero_ps(), a1=_mm256_setzero_ps(), a2=_mm256_setzero_ps(), a3=_mm256_setzero_ps();
-    for(i32 b=0;b<nb;b++){
-      const u8 *row = row0 + (size_t)b*34;
-      if(!(b&3)) _mm_prefetch(row + 4*34, _MM_HINT_T0);
-      f32 s = half_to_float(*(const u16*)row); row+=2;
-      __m256 vs = _mm256_set1_ps(s);
-      __m256i q8 = _mm256_loadu_si256((const __m256i*)row); row+=32;
-      __m128i lo = _mm256_castsi256_si128(q8);
-      __m128i hi = _mm256_extracti128_si256(q8,1);
-      __m256 q0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),vs);
-      __m256 q1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))),vs);
-      __m256 q2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),vs);
-      __m256 q3=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))),vs);
+    i32 b=0;
+    const i32 nb2 = nb & ~1; /* 2 bloques/iter: 68 bytes → 64 valores con 2 escalas */
+    for(; b<nb2; b+=2){
+      __m256 vs0=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
+      __m256i qw0=_mm256_loadu_si256((const __m256i*)row); row+=32;
+      __m256 vs1=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
+      __m256i qw1=_mm256_loadu_si256((const __m256i*)row); row+=32;
+      __m128i l0=_mm256_castsi256_si128(qw0), h0=_mm256_extracti128_si256(qw0,1);
+      __m128i l1=_mm256_castsi256_si128(qw1), h1=_mm256_extracti128_si256(qw1,1);
       const f32 *xb = x + (size_t)b*32;
-      a0=_mm256_fmadd_ps(q0,_mm256_loadu_ps(xb+0 ),a0);
-      a1=_mm256_fmadd_ps(q1,_mm256_loadu_ps(xb+8 ),a1);
-      a2=_mm256_fmadd_ps(q2,_mm256_loadu_ps(xb+16),a2);
-      a3=_mm256_fmadd_ps(q3,_mm256_loadu_ps(xb+24),a3);
+      a0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(l0)),vs0),_mm256_loadu_ps(xb)  ,a0);
+      a1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(l0,8))),vs0),_mm256_loadu_ps(xb+8) ,a1);
+      a2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(h0)),vs0),_mm256_loadu_ps(xb+16),a2);
+      a3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(h0,8))),vs0),_mm256_loadu_ps(xb+24),a3);
+      const f32 *xb2 = xb+32;
+      a0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(l1)),vs1),_mm256_loadu_ps(xb2)  ,a0);
+      a1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(l1,8))),vs1),_mm256_loadu_ps(xb2+8) ,a1);
+      a2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(h1)),vs1),_mm256_loadu_ps(xb2+16),a2);
+      a3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(h1,8))),vs1),_mm256_loadu_ps(xb2+24),a3);
+    }
+    for(; b<nb; b++){
+      const u8 *rb = row + (size_t)(b-nb2)*34u; /* sigue despues de los 2-bloques */
+      f32 s = half_to_float(*(const u16*)rb); rb+=2;
+      __m256 vs = _mm256_set1_ps(s);
+      __m256i q8 = _mm256_loadu_si256((const __m256i*)rb); rb+=32;
+      __m128i lo = _mm256_castsi256_si128(q8), hi = _mm256_extracti128_si256(q8,1);
+      const f32 *xb = x + (size_t)b*32;
+      a0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),vs),_mm256_loadu_ps(xb),a0);
+      a1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))),vs),_mm256_loadu_ps(xb+8),a1);
+      a2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),vs),_mm256_loadu_ps(xb+16),a2);
+      a3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))),vs),_mm256_loadu_ps(xb+24),a3);
     }
     float t[8];
     _mm256_storeu_ps(t,a0); f32 s0=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
