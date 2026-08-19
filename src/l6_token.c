@@ -8,6 +8,7 @@
 #include <limits.h>
 static u16 b2u[256]; static u8 u2b[289]; static int tbl_init=0;
 static void tok_init_tables(void){
+  /* llamada single-thread (carga de modelo); si se usa en multi-hilo agregar pthread_once */
   if(tbl_init) return; tbl_init=1;
   int used[256]; for(int i=0;i<256;i++) used[i]=0;
   for(int b=33;b<=126;b++) used[b]=1;

@@ -88,7 +88,7 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   else if(*arch!=ARCH_LLAMA) *flags|=F_QK_NORM;
   if(c->dim<=0||c->n_layers<=0||c->n_heads<=0){ fprintf(stderr,"g2bx: cfg incompleta arch=%s dim=%d layers=%d\n",aname,c->dim,c->n_layers); return -1; }
   if(c->seq_len<=0) c->seq_len=2048;
-  if(c->seq_len>8192) c->seq_len=8192;
+  if(c->seq_len>32768) c->seq_len=32768; /* cap razonable; --ctx lo baja en runtime */
   return 0;
 }
 static u64 ne_of(const GTensor *t){ u64 n=1; for(u32 i=0;i<t->n_dims;i++) n*=t->dims[i]; return n; }
@@ -153,16 +153,18 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
   u64 cursor=0; for(u32 i=0;i<ns;i++){ slots[i].off=cursor; cursor=ALIGN64(cursor+slots[i].nbytes); } u64 data_size=cursor;
   FILE *o=fopen(out_path,"wb"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(src_off); gguf_free(&g); return -1; }
   u16 ver=G2BX_VER; u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
-  fwrite(G2BX_MAGIC,1,4,o); fwrite(&ver,2,1,o); fwrite(&arch,1,1,o); fwrite(&disk_flags,1,1,o); fwrite(&c,sizeof c,1,o); fwrite(&ns,4,1,o); fwrite(slots,sizeof(Slot),ns,o);
+  int wr=1; if(fwrite(G2BX_MAGIC,1,4,o)!=4||fwrite(&ver,2,1,o)!=1||fwrite(&arch,1,1,o)!=1||fwrite(&disk_flags,1,1,o)!=1||fwrite(&c,sizeof c,1,o)!=1||fwrite(&ns,4,1,o)!=1) wr=0;
+  wr &= fwrite(slots,sizeof(Slot),ns,o)==ns;
   u8 *zeros=calloc(64,1); u64 written=0;
   for(u32 i=0;i<ns;i++){
     while(written<slots[i].off){ u64 pad=slots[i].off-written; if(pad>64) pad=64; fwrite(zeros,1,(size_t)pad,o); written+=pad; }
-    fwrite(src_ptr[i],1,src_sz[i],o); written+=src_sz[i];
+    wr &= fwrite(src_ptr[i],1,src_sz[i],o)==src_sz[i]; written+=src_sz[i];
   }
-  while(written<data_size){ u64 pad=data_size-written; if(pad>64) pad=64; fwrite(zeros,1,(size_t)pad,o); written+=pad; }
+  while(written<data_size){ u64 pad=data_size-written; if(pad>64) pad=64; wr &= fwrite(zeros,1,(size_t)pad,o)==(size_t)pad; written+=pad; }
   free(zeros);
   Tokenizer tk; if(tok_from_gguf(&g,&tk)==0){ tok_write_section(o,&tk); fprintf(stderr,"  tokenizer: %d tokens, %d merges (bos=%d eos=%d)\n",tk.n,tk.nmerges,tk.bos,tk.eos); tok_free(&tk); } else fprintf(stderr,"  tokenizer: NO disponible\n");
   fclose(o);
+  if(!wr) fprintf(stderr,"g2bx: error de escritura en %s (disco lleno?)\n",out_path);
   fprintf(stderr,"g2bx pack -> %s\n  arch=%u flags=0x%02x layers=%d dim=%d head_dim=%d kv=%d vocab=%d\n  slots=%u weight_bytes=%llu (GGUF era %llu)\n  rope_theta=%.0f qk_norm=%s tie_embd=%s\n",out_path,arch,flags,c.n_layers,c.dim,c.head_dim,c.n_kv_heads,c.vocab,ns,(unsigned long long)data_size,(unsigned long long)g.size,c.rope_theta,(flags&F_QK_NORM)?"yes":"no",(flags&F_TIE_EMBD)?"yes":"no");
   free(slots); free(src_ptr); free(src_sz); free(src_off); free(ne_arr); for(u32 i=0;i<ns;i++) if(conv_ptr[i]) free(conv_ptr[i]); free(conv_ptr); gguf_free(&g); return 0;
 }
