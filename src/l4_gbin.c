@@ -29,41 +29,63 @@ static int parse_name(const char *name, u8 *role, u16 *layer){
   if(!strcmp(p,"ffn_down.weight")){ *role=R_FFN_DOWN; return 0; }
   return -1;
 }
-static i64 meta_try(GGUF *g, const char *a, const char *b){ i64 v=gguf_meta_i64(g,a); return v?v:gguf_meta_i64(g,b); }
-static f32 meta_tryf(GGUF *g, const char *a, const char *b){ f32 v=gguf_meta_f32(g,a); return v!=0.f?v:gguf_meta_f32(g,b); }
-static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
-  memset(c,0,sizeof *c); *flags=0; *arch=ARCH_LLAMA;
-  char aname[64]={0}; gguf_meta_str(g,"general.architecture",aname,sizeof aname);
-  if(!strcmp(aname,"qwen3")) *arch=ARCH_QWEN3;
-  else if(!strcmp(aname,"qwen2")||!strcmp(aname,"qwen2moe")) *arch=ARCH_QWEN2;
-  else if(!strcmp(aname,"llama")) *arch=ARCH_LLAMA;
-  else if(aname[0]){ if(gguf_meta_i64(g,"qwen3.block_count")) *arch=ARCH_QWEN3; else if(gguf_meta_i64(g,"qwen2.block_count")) *arch=ARCH_QWEN2; }
-  const char *p = *arch==ARCH_QWEN3 ? "qwen3" : *arch==ARCH_QWEN2 ? "qwen2" : "llama";
+static i64 meta_pref(GGUF *g, const char *arch, const char *suf){
   char k[96];
-#define MK(suf) (snprintf(k,sizeof k,"%s." suf,p),k)
-  c->dim        =(i32)meta_try(g,MK("embedding_length"),"llama.embedding_length");
-  c->hidden_dim =(i32)meta_try(g,MK("feed_forward_length"),"llama.feed_forward_length");
-  c->n_layers   =(i32)meta_try(g,MK("block_count"),"llama.block_count");
-  c->n_heads    =(i32)meta_try(g,MK("attention.head_count"),"llama.attention.head_count");
-  c->n_kv_heads =(i32)meta_try(g,MK("attention.head_count_kv"),"llama.attention.head_count_kv");
-  c->vocab      =(i32)gguf_meta_i64(g,"tokenizer.ggml.tokens");
-  if(!c->vocab) c->vocab=(i32)meta_try(g,MK("vocab_size"),"llama.vocab_size");
-  c->seq_len    =(i32)meta_try(g,MK("context_length"),"llama.context_length");
-  c->eps        =meta_tryf(g,MK("attention.layer_norm_rms_epsilon"),"llama.attention.layer_norm_rms_epsilon");
+  const char *prefs[4]; int np=0;
+  if(arch && arch[0]) prefs[np++]=arch;
+  if(!arch || (strcmp(arch,"llama")&&strcmp(arch,"qwen2")&&strcmp(arch,"qwen2moe")&&strcmp(arch,"qwen3"))) { prefs[np++]="qwen3"; prefs[np++]="qwen2"; }
+  prefs[np++]="llama";
+  for(int i=0;i<np;i++){ snprintf(k,sizeof k,"%s.%s",prefs[i],suf); i64 v=gguf_meta_i64(g,k); if(v) return v; }
+  return 0;
+}
+static f32 meta_preff(GGUF *g, const char *arch, const char *suf){
+  char k[96];
+  const char *prefs[4]; int np=0;
+  if(arch && arch[0]) prefs[np++]=arch;
+  if(!arch || (strcmp(arch,"llama")&&strcmp(arch,"qwen2")&&strcmp(arch,"qwen2moe")&&strcmp(arch,"qwen3"))) { prefs[np++]="qwen3"; prefs[np++]="qwen2"; }
+  prefs[np++]="llama";
+  for(int i=0;i<np;i++){ snprintf(k,sizeof k,"%s.%s",prefs[i],suf); f32 v=gguf_meta_f32(g,k); if(v!=0.f) return v; }
+  return 0;
+}
+static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
+  memset(c,0,sizeof *c); *flags=0;
+  char aname[64]={0}; gguf_meta_str(g,"general.architecture",aname,sizeof aname);
+  /* Arquitecturas conocidas LLM/Qwen; cualquier otra (p.ej. dflash) se deduce por heurística */
+  const int is_llama=!strcmp(aname,"llama");
+  const int is_qwen =!strcmp(aname,"qwen2")||!strcmp(aname,"qwen2moe")||!strcmp(aname,"qwen3");
+  if(is_llama) *arch=ARCH_LLAMA;
+  else {
+    *arch = is_qwen ? ARCH_QWEN2 : ARCH_QWEN3; /* custom -> NEOX/Qwen por defecto */
+    if(!is_qwen && aname[0]){
+      int looks_qwen = gguf_by_name(g,"blk.0.attn_q_norm.weight")!=NULL
+                    || gguf_by_name(g,"blk.0.attn_k_norm.weight")!=NULL
+                    || meta_pref(g,aname,"attention.key_length")>0;
+      if(!looks_qwen) *arch=ARCH_LLAMA;
+    }
+  }
+  const char *p = aname[0]? aname : (*arch==ARCH_LLAMA?"llama":*arch==ARCH_QWEN2?"qwen2":"qwen3");
+  c->dim        =(i32)meta_pref(g,p,"embedding_length");
+  c->hidden_dim =(i32)meta_pref(g,p,"feed_forward_length");
+  c->n_layers   =(i32)meta_pref(g,p,"block_count");
+  c->n_heads    =(i32)meta_pref(g,p,"attention.head_count");
+  c->n_kv_heads =(i32)meta_pref(g,p,"attention.head_count_kv");
+  c->vocab      =(i32)gguf_meta_arr_len(g,"tokenizer.ggml.tokens");
+  if(!c->vocab) c->vocab=(i32)meta_pref(g,p,"vocab_size");
+  c->seq_len    =(i32)meta_pref(g,p,"context_length");
+  c->eps        =meta_preff(g,p,"attention.layer_norm_rms_epsilon");
   if(c->eps==0.f) c->eps=1e-6f;
-  c->head_dim   =(i32)meta_try(g,MK("attention.key_length"),"qwen3.attention.key_length");
+  c->head_dim   =(i32)meta_pref(g,p,"attention.key_length");
   if(!c->head_dim && c->n_heads) c->head_dim=c->dim/c->n_heads;
-  c->rope_theta =meta_tryf(g,MK("rope.freq_base"),"llama.rope.freq_base");
-  if(c->rope_theta==0.f) c->rope_theta=(*arch==ARCH_QWEN3)?1000000.f:10000.f;
+  c->rope_theta =meta_preff(g,p,"rope.freq_base");
+  if(c->rope_theta==0.f) c->rope_theta=(*arch==ARCH_LLAMA)?10000.f:1000000.f;
   if(!c->n_kv_heads) c->n_kv_heads=c->n_heads;
   if(!c->vocab){
     GTensor *e=gguf_by_name(g,"token_embd.weight");
     if(e && e->n_dims>=2){ u64 a=e->dims[0], b=e->dims[1]; c->vocab=(i32)(a>b?a:b); if(!c->dim) c->dim=(i32)(a<b?a:b); }
   }
   if(!gguf_by_name(g,"output.weight")) *flags|=F_TIE_EMBD;
-  if(gguf_by_name(g,"blk.0.attn_q_norm.weight")) *flags|=F_QK_NORM;
-  if(*arch==ARCH_QWEN3) *flags|=F_QK_NORM;
-#undef MK
+  if(gguf_by_name(g,"blk.0.attn_q_norm.weight") || gguf_by_name(g,"blk.0.attn_k_norm.weight")) *flags|=F_QK_NORM;
+  else if(*arch!=ARCH_LLAMA) *flags|=F_QK_NORM;
   if(c->dim<=0||c->n_layers<=0||c->n_heads<=0){ fprintf(stderr,"g2bx: cfg incompleta arch=%s dim=%d layers=%d\n",aname,c->dim,c->n_layers); return -1; }
   if(c->seq_len<=0) c->seq_len=2048;
   if(c->seq_len>8192) c->seq_len=8192;
@@ -86,6 +108,9 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   for(u64 b=0;b<nb;b++){ gguf_dequant(srctype,(u8*)sp,blk,32); quant_block_q4_0(blk,dp); sp+=st; dp+=18; } return out;
 }
 int g2bx_pack(const char *gguf_path, const char *out_path){
+  return g2bx_pack_ex(gguf_path, out_path, 0);
+}
+int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
   GGUF g; if(gguf_load(gguf_path,&g)) return -1;
   ModelCfg c; u8 arch, flags; if(read_cfg(&g,&c,&arch,&flags)){ gguf_free(&g); return -1; }
   Slot *slots=calloc(g.n_tensors,sizeof(Slot)); u32 ns=0;
@@ -106,15 +131,21 @@ int g2bx_pack(const char *gguf_path, const char *out_path){
   if(skipped_type)
     fprintf(stderr,"g2bx: %u tensores omitidos por tipo no soportado (Q1/Q2_K/Q3_K/...)\n", skipped_type);
   if(!ns){ fprintf(stderr,"g2bx: 0 tensores reconocidos\n"); free(slots); gguf_free(&g); return -1; }
+  { int has_embd=0; for(u32 i=0;i<ns;i++) if(slots[i].role==R_TOK_EMBD){ has_embd=1; break; }
+    if(!has_embd)
+      fprintf(stderr,"g2bx: AVISO — sin token_embd.weight: modelo draft/decode-only "
+        "(speculative decoding); no puede generar texto standalone (le faltan pesos del teacher)\n");
+  }
   for(u32 a=0;a<ns;a++) for(u32 b=a+1;b<ns;b++){
     int la=slots[a].layer==0xFFFF?-1:(int)slots[a].layer; int lb=slots[b].layer==0xFFFF?-1:(int)slots[b].layer;
     if(lb<la || (lb==la && slots[b].role<slots[a].role)){
       Slot ts=slots[a]; slots[a]=slots[b]; slots[b]=ts; u8 *tp=src_ptr[a]; src_ptr[a]=src_ptr[b]; src_ptr[b]=tp; u32 tz=src_sz[a]; src_sz[a]=src_sz[b]; src_sz[b]=tz; u64 tn=ne_arr[a]; ne_arr[a]=ne_arr[b]; ne_arr[b]=tn;
     }
   }
-  /* FIX: preservar Q8_0 y Q4_0 originales, solo convertir F32/F16 -> Q4_0 para no perder calidad */
+  /* FIX: preservar Q8_0/Q4_0; convertir F32/F16 -> Q4_0 (y Q8_0 -> Q4_0 si downq4, ~2x mas rapido) */
   for(u32 i=0;i<ns;i++){
-    if(is_weight_role(slots[i].role) && (slots[i].type==T_F32 || slots[i].type==T_F16)){
+    if(is_weight_role(slots[i].role) &&
+       (slots[i].type==T_F32 || slots[i].type==T_F16 || (downq4 && slots[i].type==T_Q8_0))){
       u8 *q4=convert_tensor_q4_0(src_ptr[i], slots[i].type, ne_arr[i]);
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }

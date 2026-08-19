@@ -121,6 +121,13 @@ int gguf_meta_str(GGUF *g, const char *key, char *out, i32 outsz){
   i32 m=n<(u64)(outsz-1)?(i32)n:outsz-1;
   memcpy(out,v,m); out[m]=0; return 0;
 }
+u64 gguf_meta_arr_len(GGUF *g, const char *key){
+  u32 vt; u8 *v=meta_find(g,key,&vt);
+  if(!v || vt!=MV_ARR) return 0;
+  u32 at=ru32(v); v+=4;
+  (void)at;
+  return ru64(v);
+}
 int gguf_meta_strarr(GGUF *g, const char *key, char ***out, u64 *n){
   u32 vt; u8 *v=meta_find(g,key,&vt);
   if(!v||vt!=MV_ARR) return -1;

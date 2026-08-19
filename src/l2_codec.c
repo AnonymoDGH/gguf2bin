@@ -116,8 +116,7 @@ void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
 void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb = n/32;
   const __m128i mask0F = _mm_set1_epi8(0x0F);
-  const __m128i maskF0 = _mm_set1_epi8((char)0xF0);
-  const __m128i eight = _mm_set1_epi8(8);
+  const __m256i sub8  = _mm256_set1_epi8((char)8);
   #pragma omp parallel for schedule(static)
   for(i32 i=0;i<d;i++){
     const u8 *row = w + (size_t)i*(size_t)nb*18;
@@ -129,64 +128,29 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
       f32 s = half_to_float(*(const u16*)row); row+=2;
       __m256 vs = _mm256_set1_ps(s);
       __m128i qs = _mm_loadu_si128((const __m128i*)row); row+=16;
-      // low nibbles
-      __m128i low = _mm_and_si128(qs, mask0F);
-      // high nibbles: and F0, srli 4
-      __m128i high = _mm_and_si128(qs, maskF0);
-      high = _mm_srli_epi16(high,4);
-      high = _mm_and_si128(high, mask0F);
-      // low -8
-      __m128i low_sub = _mm_sub_epi8(low, eight);
-      __m128i high_sub = _mm_sub_epi8(high, eight);
-      // convert 8 low bytes to 8 int32 -> float
-      // first 8 bytes: low0, high0
-      // low part: low_sub lower 8 bytes
-      __m128i low_low = low_sub; // contains 16 bytes, we need first 8
-      __m128i high_low = high_sub;
-      // second 8 bytes for second half of block? Actually block has 16 bytes qs -> 32 q's
-      // We already have low and high each 16 bytes, but we process in 8-byte chunks
-      // Let's process 0..7 and 8..15 separately
-
-      // 0..7 low/high
-      __m128i low0 = _mm_loadl_epi64((__m128i*)&low_sub); // low 8 bytes
-      __m128i high0 = _mm_loadl_epi64((__m128i*)&high_sub);
-      // Actually need to load from low_sub/high_sub correctly
-      // To avoid complexity, we will do scalar for the 8-byte groups but using AVX for conversion
-
-      // Convert low 8 bytes to float
-      __m256i low0_32 = _mm256_cvtepi8_epi32(_mm_loadl_epi64((__m128i*)&low_sub));
-      __m256i high0_32 = _mm256_cvtepi8_epi32(_mm_loadl_epi64((__m128i*)&high_sub));
-      __m256 low0_f = _mm256_cvtepi32_ps(low0_32);
-      __m256 high0_f = _mm256_cvtepi32_ps(high0_32);
-      low0_f = _mm256_mul_ps(low0_f, vs);
-      high0_f = _mm256_mul_ps(high0_f, vs);
-      const f32 *xb = x + b*32;
-      __m256 x0 = _mm256_loadu_ps(xb+0);
-      __m256 x1 = _mm256_loadu_ps(xb+16);
-      acc0 = _mm256_fmadd_ps(low0_f, x0, acc0);
-      acc1 = _mm256_fmadd_ps(high0_f, x1, acc1);
-
-      // next 8 bytes (8..15)
-      __m128i low1 = _mm_bsrli_si128(low_sub,8);
-      __m128i high1 = _mm_bsrli_si128(high_sub,8);
-      __m256i low1_32 = _mm256_cvtepi8_epi32(low1);
-      __m256i high1_32 = _mm256_cvtepi8_epi32(high1);
-      __m256 low1_f = _mm256_cvtepi32_ps(low1_32);
-      __m256 high1_f = _mm256_cvtepi32_ps(high1_32);
-      low1_f = _mm256_mul_ps(low1_f, vs);
-      high1_f = _mm256_mul_ps(high1_f, vs);
-      __m256 x2 = _mm256_loadu_ps(xb+8);
-      __m256 x3 = _mm256_loadu_ps(xb+24);
-      acc2 = _mm256_fmadd_ps(low1_f, x2, acc2);
-      acc3 = _mm256_fmadd_ps(high1_f, x3, acc3);
+      /* byte j -> q[j] (nibble bajo), q[j+16] (nibble alto). Desempaquetar en orden q0..q31. */
+      __m128i ql = _mm_and_si128(qs, mask0F);            /* q0..q15 */
+      __m128i qh = _mm_and_si128(_mm_srli_epi16(qs,4), mask0F); /* q16..q31 */
+      __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(ql), qh, 1);
+      v = _mm256_sub_epi8(v, sub8);
+      __m128i lo = _mm256_castsi256_si128(v);
+      __m128i hi = _mm256_extracti128_si256(v,1);
+      const f32 *xb = x + (size_t)b*32;
+      __m256 q0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)), vs);
+      __m256 q1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))), vs);
+      __m256 q2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)), vs);
+      __m256 q3=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))), vs);
+      acc0=_mm256_fmadd_ps(q0,_mm256_loadu_ps(xb+0 ),acc0);
+      acc1=_mm256_fmadd_ps(q1,_mm256_loadu_ps(xb+8 ),acc1);
+      acc2=_mm256_fmadd_ps(q2,_mm256_loadu_ps(xb+16),acc2);
+      acc3=_mm256_fmadd_ps(q3,_mm256_loadu_ps(xb+24),acc3);
     }
-    // sum accs
-    __m256 sum = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
-    // horizontal sum
-    __m128 low128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum,1));
-    low128 = _mm_add_ps(low128, _mm_movehl_ps(low128, low128));
-    low128 = _mm_add_ss(low128, _mm_shuffle_ps(low128, low128, 1));
-    out[i] = _mm_cvtss_f32(low128);
+    float t[8];
+    _mm256_storeu_ps(t,acc0); f32 s0=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    _mm256_storeu_ps(t,acc1); f32 s1=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    _mm256_storeu_ps(t,acc2); f32 s2=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    _mm256_storeu_ps(t,acc3); f32 s3=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];
+    out[i]=s0+s1+s2+s3;
   }
 }
 #else

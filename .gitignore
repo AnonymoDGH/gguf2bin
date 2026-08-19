@@ -7,6 +7,10 @@ src/*.o
 tiny_test.g2bx
 _check_tiny.g2bx
 *.g2bx.cache
+tools/*.exe
+
+# Tools build artifacts
+kvtest.exe
 
 # Model weights (large binaries)
 *.gguf

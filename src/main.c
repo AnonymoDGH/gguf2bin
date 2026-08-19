@@ -7,9 +7,22 @@
 #if defined(_WIN32)
 #include <windows.h>
 #endif
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #define RECENT_CAP 128
 #define RECENT_USE 64
+
+static void set_threads(int n){
+#if defined(_OPENMP)
+  if(n>0) omp_set_num_threads(n);
+  int t = n>0?n:omp_get_num_threads();
+  fprintf(stderr,"hilos: usando %d core(s)\n", t);
+#else
+  fprintf(stderr,"hilos: compilado sin OpenMP (usa -fopenmp para acelerar)\n");
+#endif
+}
 
 typedef struct {
   i32 ids[RECENT_CAP];
@@ -34,7 +47,7 @@ static int recent_snapshot(const RecentBuf *r, i32 *out, int maxn){
 static void usage(const char *a0){
   fprintf(stderr,
     "gguf2bin2 — GGUF -> G2BX (formato propio) -> inferencia Qwen3/Llama\n\n"
-    "  %s pack   <model.gguf> <out.g2bx>\n"
+    "  %s pack   <model.gguf> <out.g2bx> [--q4]\n"
     "  %s info   <model.g2bx|gguf>\n"
     "  %s run    <model> [texto] [opts]\n"
     "      -n N          tokens a generar (def 64)\n"
@@ -47,10 +60,18 @@ static void usage(const char *a0){
     "  %s synth  <out.g2bx>\n"
     "  %s bench  <model> [-n N]\n"
     "  %s chat   <model> [-n N] [-t TEMP] [--no-think]\n\n"
+    "RAM / contexto (run, chat, bench):\n"
+    "      -c N / --ctx N     contexto efectivo (KV cache) en runtime (def: el del modelo)\n"
+    "      --q8-kv            KV cache cuantizada Q8_0 (~3.8x menos RAM que F32)\n"
+    "      --f32-kv           fuerza KV cache F32 (desactiva el auto-Q8 >1GB)\n"
+    "      --max-ram MB       presupuesto RAM: auto-Q8 + baja ctx hasta caber (ej: 2048)\n"
+    "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
+    "      --threads N        numero de cores OpenMP (def: todos)\n\n"
     "Ejemplos:\n"
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
-    "  %s chat qwen.g2bx --no-think -t 0.7\n",
-    a0,a0,a0,a0,a0,a0,a0,a0);
+    "  %s chat qwen.g2bx --no-think -t 0.7\n"
+    "  %s bench qwen.g2bx --max-ram 2048\n",
+    a0,a0,a0,a0,a0,a0,a0,a0,a0);
 }
 
 static int ends_with(const char *s, const char *suf){
@@ -66,7 +87,8 @@ static int load_any(const char *path, Model *m){
 }
 static int cmd_pack(int argc, char **argv){
   if(argc<4){ usage(argv[0]); return 1; }
-  return g2bx_pack(argv[2],argv[3])?1:0;
+  int downq4 = (argc>4 && !strcmp(argv[4],"--q4")) || (argc>5 && !strcmp(argv[5],"--q4"));
+  return g2bx_pack_ex(argv[2],argv[3],downq4)?1:0;
 }
 
 static int cmd_info(int argc, char **argv){
@@ -103,6 +125,54 @@ static int cmd_info(int argc, char **argv){
 
 static i32 tokenize_prefix(Tokenizer *t, const char *text, i32 **out){
   i32 *ids; i32 n=tok_encode(t,text,&ids); *out=ids; return n;
+}
+
+/* Ruta por defecto para el swap: D: (disco con espacio) o el temp del sistema. */
+static int drive_ok(const char *root){
+#if defined(_WIN32)
+  UINT r=GetDriveTypeA(root);
+  return r!=DRIVE_NO_ROOT_DIR && r!=DRIVE_UNKNOWN;
+#else
+  (void)root; return 0;
+#endif
+}
+static const char *default_swap(void){
+#if defined(_WIN32)
+  static char buf[300];
+  if(drive_ok("D:\\")) snprintf(buf,sizeof buf,"D:\\gguf2bin2_kv.swap");
+  else { if(!GetTempPathA(sizeof buf,buf)) strcpy(buf,"C:\\"); strncat(buf,"gguf2bin2_kv.swap",sizeof buf-1); }
+  return buf;
+#else
+  return "/tmp/gguf2bin2_kv.swap";
+#endif
+}
+
+/* Aplica opciones de RAM/contexto tras cargar el modelo y reporta el footprint. */
+static int apply_ram_opts(Model *m, i32 ctx, u64 max_ram, int q8kv, int f32kv, const char *swap){
+  int realloc=0;
+  if(f32kv) m->flags &= (u8)~F_KV_Q8;
+  else if(q8kv){ m->flags |= F_KV_Q8; realloc=1; }
+  else if(max_ram==0 && ctx<=0 && model_kv_bytes(m,0) > ((u64)1<<30)){
+    m->flags |= F_KV_Q8; realloc=1;
+    fprintf(stderr,"ram: KV en F32 dispararia >1 GB -> activo KV Q8_0 automatico (--f32-kv para forzar)\n");
+  }
+  if(max_ram>0){
+    u64 budget = (u64)max_ram << 20;
+    if(model_auto_budget(m,budget)) return -1;
+  } else if(ctx>0){
+    if(model_set_ctx(m,ctx)) return -1;
+  } else if(q8kv||realloc){
+    if(model_set_ctx(m, m->ctx>0?m->ctx:m->c.seq_len)) return -1;
+  }
+  if(swap && *swap){
+    const char *p = (!strcmp(swap,"@")) ? default_swap() : swap;
+    if(model_enable_swap(m,p))
+      fprintf(stderr,"swap: no se pudo usar %s (prueba --q8-kv en su lugar)\n", p);
+  }
+  model_ram_report(m);
+  if(m->c.seq_len && ctx>0 && ctx!=m->ctx)
+    fprintf(stderr,"model: contexto efectivo %d (max del modelo %d)\n", m->ctx, m->c.seq_len);
+  return 0;
 }
 
 /* sampling con top-k, top-p, repeat penalty (penalty se aplica UNA sola vez) */
@@ -182,10 +252,17 @@ static int cmd_run(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
+  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
+    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
+    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
+    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
@@ -200,6 +277,8 @@ static int cmd_run(int argc, char **argv){
     }
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
+  if(nthr>0) set_threads(nthr);
   if(text[0] && m.tok){
     i32 *enc; i32 en=tokenize_prefix(m.tok,text,&enc);
     if(en>0){
@@ -218,8 +297,8 @@ static int cmd_run(int argc, char **argv){
   i32 rep_tmp[RECENT_USE];
 
   for(i32 i=0;i<np;i++){
-    if(pos >= m.c.seq_len){
-      fprintf(stderr,"\nrun: contexto lleno (seq_len=%d); truncando prompt\n", m.c.seq_len);
+    if(pos >= m.ctx){
+      fprintf(stderr,"\nrun: contexto lleno (ctx=%d); truncando prompt\n", m.ctx);
       break;
     }
     if(prompt[i]<0 || prompt[i]>=m.c.vocab){
@@ -234,8 +313,8 @@ static int cmd_run(int argc, char **argv){
     pos++;
   }
   for(i32 i=0;i<n_tok;i++){
-    if(pos >= m.c.seq_len){
-      fprintf(stderr,"\nrun: contexto lleno (seq_len=%d); stop\n", m.c.seq_len);
+    if(pos >= m.ctx){
+      fprintf(stderr,"\nrun: contexto lleno (ctx=%d); stop\n", m.ctx);
       break;
     }
     float *tmp=(float*)malloc((size_t)m.c.vocab*sizeof(float));
@@ -266,8 +345,15 @@ static int cmd_chat(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
+  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
+    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
+    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
+    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
@@ -275,6 +361,8 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
+  if(nthr>0) set_threads(nthr);
   if(!m.tok){ fprintf(stderr,"chat: el modelo no trae tokenizer. Re-empaqueta\n"); model_free(&m); return 1; }
   Tokenizer *tk=m.tok;
   i32 im_start=find_tok(tk,"<|im_start|>"), im_end=find_tok(tk,"<|im_end|>");
@@ -315,18 +403,18 @@ static int cmd_chat(int argc, char **argv){
     }
     free(ut); free(at);
     for(; fed<cn; fed++){
-      if(pos >= m.c.seq_len){
-        fprintf(stderr,"chat: contexto lleno (seq_len=%d)\n", m.c.seq_len);
+      if(pos >= m.ctx){
+        fprintf(stderr,"chat: contexto lleno (ctx=%d)\n", m.ctx);
         break;
       }
       model_forward(&m,conv[fed],pos++,logits);
     }
-    if(pos >= m.c.seq_len){ printf("\n"); continue; }
+    if(pos >= m.ctx){ printf("\n"); continue; }
     printf("Qwen3> "); fflush(stdout);
     RecentBuf recent; memset(&recent,0,sizeof recent);
     i32 rep_tmp[RECENT_USE];
     for(i32 step=0; step<n_tok; step++){
-      if(pos >= m.c.seq_len){
+      if(pos >= m.ctx){
         fprintf(stderr,"\nchat: contexto lleno; stop\n");
         break;
       }
@@ -364,18 +452,28 @@ static double now_sec(void){
 
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
-  i32 n=32;
-  for(int i=3;i<argc;i++) if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
+  i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  for(int i=3;i<argc;i++){
+    if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
+    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
+    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
+    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
+  }
   Model m; if(load_any(argv[2],&m)) return 1;
+  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
+  if(nthr>0) set_threads(nthr);
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
   model_forward(&m,1,0,logits);
   double t0=now_sec();
   for(i32 i=0;i<n;i++)
-    model_forward(&m, i % (m.c.vocab>1?m.c.vocab:1), i % m.c.seq_len, logits);
+    model_forward(&m, (i32)(i % (m.c.vocab>1?m.c.vocab:1)), (i32)(i % (m.ctx>0?m.ctx:m.c.seq_len)), logits);
   double sec=now_sec()-t0; if(sec<1e-9) sec=1e-9;
-  fprintf(stderr,"bench: %d tokens in %.4fs -> %.1f tok/s  (dim=%d L=%d hd=%d)\n",
-    n,sec,n/sec,m.c.dim,m.c.n_layers,m.c.head_dim);
+  fprintf(stderr,"bench: %d tokens in %.4fs -> %.1f tok/s  (dim=%d L=%d hd=%d ctx=%d)\n",
+    n,sec,n/sec,m.c.dim,m.c.n_layers,m.c.head_dim,m.ctx);
   free(logits); model_free(&m); return 0;
 }
 
