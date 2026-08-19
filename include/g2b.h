@@ -11,7 +11,8 @@ typedef float    f32;
 
 enum {
   T_F32=0, T_F16=1, T_Q4_0=2, T_Q4_1=3, T_Q5_0=6, T_Q5_1=7,
-  T_Q8_0=8, T_Q8_1=9, T_Q2_K=10, T_Q3_K=11, T_Q4_K=12, T_Q5_K=13, T_Q6_K=14, T_Q8_K=15
+  T_Q8_0=8, T_Q8_1=9, T_Q2_K=10, T_Q3_K=11, T_Q4_K=12, T_Q5_K=13, T_Q6_K=14, T_Q8_K=15,
+  T_IQ4_NL=16, T_IQ4_XS=17, T_IQ3_XXS=18, T_IQ2_XXS=19, T_IQ2_XS=20, T_IQ3_S=21, T_IQ2_S=22, T_IQ1_S=23, T_IQ1_M=24
 };
 enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };

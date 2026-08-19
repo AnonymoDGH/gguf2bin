@@ -7,7 +7,9 @@ u64 ggml_block_size(u32 type){
   switch(type){
     case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1:
     case T_Q8_0: case T_Q8_1: return 32;
-    case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_Q8_K: return 256;
+    case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_Q8_K:
+    case T_IQ4_XS: case T_IQ3_XXS: case T_IQ2_XXS: case T_IQ2_XS: case T_IQ3_S: case T_IQ2_S: case T_IQ1_S: case T_IQ1_M: return 256;
+    case T_IQ4_NL: return 64;
     default: return 1;
   }
 }
@@ -22,6 +24,11 @@ u64 ggml_type_bytes(u32 type){
     case T_Q2_K: return 84;   case T_Q3_K: return 110;
     case T_Q4_K: return 144;  case T_Q5_K: return 176;
     case T_Q6_K: return 210;   case T_Q8_K: return 34*8; /* 8 bloques Q8_0 en un superbloque */
+    case T_IQ4_NL: return 32;  case T_IQ4_XS: return 136;
+    case T_IQ3_XXS: return 96; case T_IQ2_XXS: return 64;
+    case T_IQ2_XS: return 112;  case T_IQ3_S: return 96;
+    case T_IQ2_S: return 64;   case T_IQ1_S: return 40;
+    case T_IQ1_M: return 48;
     default:     return 4;
   }
 }
@@ -305,11 +312,51 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
 }
 #endif
 static u64 row_stride(u32 type, i32 n){ return (n/ggml_block_size(type))*ggml_type_bytes(type); }
+/* Q2_K fused dot: desempaqueta 2-bit en 8 sub-grupos × 16 valores por super-bloque de 256 */
+static void matmul_q2_K(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
+  i32 nb = n/QK_K;
+  #pragma omp parallel for schedule(static)
+  for(i32 i=0;i<d;i++){
+    const u8 *src = w + (size_t)i*(size_t)nb*84;
+    f32 sum = 0;
+    for(i32 b=0;b<nb;b++){
+      f32 d_block = half_to_float(*(const u16*)src); src+=2;
+      f32 dmin    = half_to_float(*(const u16*)src); src+=2;
+      const u8 *sc = src; src+=16;
+      const u8 *qs = src; src+=64;
+      const f32 *xb = x + (size_t)b*256;
+      int sg_idx = 0;
+      for(int ns=0;ns<256;ns+=128, qs+=32){
+        for(int j=0;j<4;j++){
+          int shift = j*2;
+          for(int sg=0;sg<2;sg++){ /* dos sub-grupos de 16 valores por par */
+            f32 dl = d_block * (sc[sg_idx] & 0xF);
+            f32 ml = dmin    * (sc[sg_idx] >> 4);
+            const f32 *xs = xb + ns + j*32 + sg*16;
+            const u8  *qb = qs + sg*16;
+            f32 acc_sub = 0;
+            for(int l=0;l<16;l++){
+              int q2 = ((qb[l] >> shift) & 3);
+              acc_sub += dl * (f32)q2 * xs[l] - ml * xs[l];
+            }
+            sum += acc_sub;
+            sg_idx++;
+          }
+        }
+      }
+    }
+    out[i] = sum;
+  }
+}
+
+/* dispatch Q2_K a su kernel fusionado */
+#define DISP_Q2K if(type==T_Q2_K){ matmul_q2_K(out,x,w,n,d); return; }
 void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   if(!out || !x || !w || n<=0 || d<=0){
     if(out && d>0) memset(out, 0, (size_t)d * sizeof(f32));
     return;
   }
+  DISP_Q2K
   if(type==T_Q4_0){ matmul_q4_0(out,x,w,n,d); return; }
   if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
   if(type==T_F32){ matmul(out,x,(f32*)w,n,d); return; }
