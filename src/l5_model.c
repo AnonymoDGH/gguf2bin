@@ -11,6 +11,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #define G2BX_MAGIC "G2BX"
 #define ALIGN64(x) (((x)+63ull)&~63ull)
@@ -513,7 +516,46 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
     kv_store(m, L, pos, k, v);
 
     f32 scale=1.f/sqrtf((f32)hd);
-    /* Atención: dequant de la fila K/V una sola vez por posición (también F32). */
+#if defined(__AVX2__)
+    for(i32 t=0;t<=pos;t++){
+      kv_key_row(m,L,t,m->kvrow);
+      for(i32 h=0;h<c->n_heads;h++){
+        i32 kvh=h/group; f32 *qh=q+h*hd; f32 *kt=m->kvrow+kvh*hd;
+        __m256 s0=_mm256_setzero_ps(), s1=_mm256_setzero_ps(), s2=_mm256_setzero_ps(), s3=_mm256_setzero_ps();
+        i32 jj=0;
+        for(;jj+31<hd;jj+=32){
+          s0=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj),   _mm256_loadu_ps(kt+jj),   s0);
+          s1=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+8),  _mm256_loadu_ps(kt+jj+8),  s1);
+          s2=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+16), _mm256_loadu_ps(kt+jj+16), s2);
+          s3=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+24), _mm256_loadu_ps(kt+jj+24), s3);
+        }
+        __m256 ss=_mm256_add_ps(_mm256_add_ps(s0,s1),_mm256_add_ps(s2,s3));
+        __m128 lo=_mm256_castps256_ps128(ss), hi=_mm256_extractf128_ps(ss,1);
+        lo=_mm_add_ps(lo,hi); lo=_mm_add_ps(lo,_mm_movehl_ps(lo,lo)); lo=_mm_add_ss(lo,_mm_shuffle_ps(lo,lo,1));
+        f32 s=_mm_cvtss_f32(lo);
+        for(;jj<hd;jj++) s+=qh[jj]*kt[jj];
+        att[(size_t)h*ctx+t]=s*scale;
+      }
+    }
+    for(i32 h=0;h<c->n_heads;h++) softmax(att+(size_t)h*ctx,pos+1);
+    for(i32 j=0;j<nq;j++) q[j]=0;
+    for(i32 t=0;t<=pos;t++){
+      kv_val_row(m,L,t,m->kvrow);
+      for(i32 h=0;h<c->n_heads;h++){
+        i32 kvh=h/group; __m256 va=_mm256_set1_ps(att[(size_t)h*ctx+t]);
+        f32 *vh=m->kvrow+kvh*hd; f32 *qh=q+h*hd;
+        i32 jj=0;
+        for(;jj+31<hd;jj+=32){
+          _mm256_storeu_ps(qh+jj,  _mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj),  _mm256_loadu_ps(qh+jj)));
+          _mm256_storeu_ps(qh+jj+8,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+8),_mm256_loadu_ps(qh+jj+8)));
+          _mm256_storeu_ps(qh+jj+16,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+16),_mm256_loadu_ps(qh+jj+16)));
+          _mm256_storeu_ps(qh+jj+24,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+24),_mm256_loadu_ps(qh+jj+24)));
+        }
+        f32 a=_mm_cvtss_f32(_mm256_castps256_ps128(va));
+        for(;jj<hd;jj++) qh[jj]+=a*vh[jj];
+      }
+    }
+#else
     for(i32 t=0;t<=pos;t++){
       kv_key_row(m,L,t,m->kvrow);
       for(i32 h=0;h<c->n_heads;h++){
@@ -533,6 +575,7 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
         for(i32 j=0;j<hd;j++) qh[j]+=a*vh[j];
       }
     }
+#endif
 
     Slot *wo=slot_get(m,R_ATTN_O,L);
     if(require_slot(wo,"attn_o",L)) return;

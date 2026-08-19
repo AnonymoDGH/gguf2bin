@@ -112,11 +112,22 @@ void tok_free(Tokenizer *t){
 i32 tok_encode(Tokenizer *t, const char *text, i32 **out){
   const u8 *p=(const u8*)text; size_t L=strlen(text); char **sym=NULL; i32 ns=0, scap=0;
   for(size_t i=0;i<L;i++){ u32 cp=b2u[p[i]]; char buf[5]; int bl=cp_to_utf8(cp,buf); buf[bl]=0; if(ns>=scap){ scap=scap?scap*2:32; sym=realloc(sym,(size_t)scap*sizeof(char*)); } sym[ns++]=strdup(buf); }
+  i32 *slens = malloc((size_t)ns * sizeof(i32));
+  for(i32 i=0;i<ns;i++) slens[i] = (i32)strlen(sym[i]);
   while(ns>=2){
     i32 best=INT_MAX, bi=-1;
-    for(i32 i=0;i+1<ns;i++){ size_t kl=strlen(sym[i])+1+strlen(sym[i+1])+1; char *key=malloc(kl); sprintf(key,"%s%c%s",sym[i],1,sym[i+1]); i32 r=shash_get(t->merges,key); free(key); if(r>=0 && r<best){ best=r; bi=i; } }
-    if(bi<0) break; size_t ml=strlen(sym[bi])+strlen(sym[bi+1])+1; char *m=malloc(ml); strcpy(m,sym[bi]); strcat(m,sym[bi+1]); free(sym[bi]); free(sym[bi+1]); sym[bi]=m; for(i32 k=bi+1;k+1<ns;k++) sym[k]=sym[k+1]; ns--;
+    for(i32 i=0;i+1<ns;i++){
+      size_t kl = (size_t)slens[i] + 1 + (size_t)slens[i+1] + 1;
+      char keybuf[256], *key = keybuf;
+      if(kl > sizeof keybuf) key = malloc(kl);
+      memcpy(key, sym[i], (size_t)slens[i]); key[slens[i]] = 1; memcpy(key+slens[i]+1, sym[i+1], (size_t)slens[i+1]); key[slens[i]+1+slens[i+1]] = 0;
+      i32 r = shash_get(t->merges, key);
+      if(key != keybuf) free(key);
+      if(r>=0 && r<best){ best=r; bi=i; }
+    }
+    if(bi<0) break; size_t ml = (size_t)slens[bi] + (size_t)slens[bi+1] + 1; char *m = malloc(ml); memcpy(m, sym[bi], (size_t)slens[bi]); memcpy(m+slens[bi], sym[bi+1], (size_t)slens[bi+1]); m[slens[bi]+slens[bi+1]] = 0; free(sym[bi]); free(sym[bi+1]); sym[bi]=m; slens[bi] = slens[bi] + slens[bi+1]; for(i32 k=bi+1;k+1<ns;k++){ sym[k]=sym[k+1]; slens[k]=slens[k+1]; } ns--;
   }
+  free(slens);
   i32 *ids=malloc((size_t)(ns+1)*sizeof(i32)); i32 nid=0;
   for(i32 i=0;i<ns;i++){ i32 id=shash_get(t->vocab,sym[i]); ids[nid++]=(id>=0)?id:(t->unk>=0?t->unk:0); free(sym[i]); }
   free(sym); *out=ids; return nid;
