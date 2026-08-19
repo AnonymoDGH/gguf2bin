@@ -2,6 +2,7 @@
 #include "g2b.h"
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 u64 ggml_block_size(u32 type){
   switch(type){
     case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1:
@@ -124,14 +125,13 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
     const u8 *row = w + (size_t)i*(size_t)nb*18;
     __m256 acc0=_mm256_setzero_ps(), acc1=_mm256_setzero_ps(), acc2=_mm256_setzero_ps(), acc3=_mm256_setzero_ps();
     i32 b=0;
-    const i32 nb2 = nb & ~1; /* pares: 2 bloques = 64 valores por iteracion */
+    const i32 nb2 = nb & ~1;
     for(; b<nb2; b+=2){
       _mm_prefetch(row + 9*18, _MM_HINT_T0);
-      /* layout por bloque Q4_0: [scale f16][16 nibbles] = 18 B; 2 bloques seguidos */
       __m256 vs0=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
-      __m128i lo=_mm_loadu_si128((const __m128i*)row); row+=16; /* bloque b */
+      __m128i lo=_mm_loadu_si128((const __m128i*)row); row+=16;
       __m256 vs1=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
-      __m128i hi=_mm_loadu_si128((const __m128i*)row); row+=16; /* bloque b+1 */
+      __m128i hi=_mm_loadu_si128((const __m128i*)row); row+=16;
       __m128i l0=_mm_and_si128(lo,mask0F), h0=_mm_and_si128(_mm_srli_epi16(lo,4),mask0F);
       __m128i l1=_mm_and_si128(hi,mask0F), h1=_mm_and_si128(_mm_srli_epi16(hi,4),mask0F);
       __m256i q0=_mm256_sub_epi8(_mm256_inserti128_si256(_mm256_castsi128_si256(l0),h0,1),sub8);
