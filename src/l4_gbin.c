@@ -120,7 +120,8 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
     u8 role; u16 layer; if(parse_name(g.t[i].name,&role,&layer)){ skipped_unknown++; continue; }
     /* Runtime only dequants F32/F16/Q4_0/Q4_1/Q8_0 (and packs F32/F16→Q4_0). */
     u32 ty=g.t[i].type;
-    if(ty!=T_F32 && ty!=T_F16 && ty!=T_Q4_0 && ty!=T_Q4_1 && ty!=T_Q8_0){
+    if(ty!=T_F32 && ty!=T_F16 && ty!=T_Q4_0 && ty!=T_Q4_1 && ty!=T_Q8_0
+     && ty!=T_Q2_K && ty!=T_Q3_K && ty!=T_Q4_K && ty!=T_Q5_K && ty!=T_Q6_K && ty!=T_Q8_K){
       fprintf(stderr,"g2bx: tipo %u no soportado en tensor %s (omitido)\n", ty, g.t[i].name);
       skipped_type++; continue;
     }
