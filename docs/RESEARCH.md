@@ -79,18 +79,23 @@ GGUF Qwen3-0.6B-Q8_0 Instruct (639MB, 310 tensores, dim 1024 L28)
 
 Decode Qwen3-0.6B (mmap, CPU 4 núcleos):
 
-| Build | tok/s |
-|-------|-------|
-| Escalar (sin -mavx2) | 0.7 |
-| AVX2, 1 hilo | 4.9 |
-| AVX2 + RoPE precompute, 1 hilo | 5.6 |
-| AVX2, 4 hilos | 10.9 |
-| Q4 pack (pesos 335 MB vs 633 MB), 4 hilos | 10.4 |
+| Build | tok/s | notas |
+|-------|-------|-------|
+| Escalar (sin -mavx2) | 0.7 | — |
+| AVX2, 1 hilo | 4.9 | Q8 |
+| AVX2 + RoPE precompute, 1 hilo | 5.6 | Q8 |
+| AVX2, 4 hilos (Q8) | 10.1 | bound memoria (~7 GB/s) |
+| **AVX2, 4 hilos (Q4, kernel 2-bloques)** | **11.3** | half RAM, kernel optimizado |
 
-Hallazgos: el decode está limitado por cómputo/FMA (no por ancho de banda de
-memoria) en este CPU; por eso Q4 no acelera y la palanca real es la paralelización
-del matmul por filas de salida. El beneficio de `pack --q4` es de *capacidad*
-(mismos 2 GB ↦ modelo más grande), no de tok/s.
+Hallazgos (CPU i5-6200U, 2C/4T, sin AVX-512):
+- El decode es **bound por cómputo del kernel + ancho de banda de memoria** (~7 GB/s).
+- El kernel Q8_0 es más eficiente por byte (5-8 GB/s); el Q4_0 original solo 3-4 GB/s
+  (extracción de nibbles ~1.5x más ops) → anulaba el ahorro de bytes.
+- Kernel Q4_0 reescrito: procesa **2 bloques/iteración** amortizando la extracción →
+  Q4 (11.3 tok/s) supera a Q8 (10.1) usando la mitad de RAM. Q4 ≟ Q8 en generación
+  greedy.
+- `mmbench` (tools/) aísla y mide cada kernel: Q8 ~8.8 / Q4 ~4.4 GB/s en la capa de
+  salida; Q4 ~5 GB/s en las capas pequeñas.
 
 Optimizaciones aplicadas v3.4b:
 - `-mavx2 -mfma -fopenmp` por defecto (Makefile): activa los kernels AVX2 (Q8_0/Q4_0).

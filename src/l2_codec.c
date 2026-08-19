@@ -120,30 +120,45 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   #pragma omp parallel for schedule(static)
   for(i32 i=0;i<d;i++){
     const u8 *row = w + (size_t)i*(size_t)nb*18;
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    __m256 acc2 = _mm256_setzero_ps();
-    __m256 acc3 = _mm256_setzero_ps();
-    for(i32 b=0;b<nb;b++){
+    __m256 acc0=_mm256_setzero_ps(), acc1=_mm256_setzero_ps(), acc2=_mm256_setzero_ps(), acc3=_mm256_setzero_ps();
+    i32 b=0;
+    const i32 nb2 = nb & ~1; /* pares: 2 bloques = 64 valores por iteracion */
+    for(; b<nb2; b+=2){
+      /* layout por bloque Q4_0: [scale f16][16 nibbles] = 18 B; 2 bloques seguidos */
+      __m256 vs0=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
+      __m128i lo=_mm_loadu_si128((const __m128i*)row); row+=16; /* bloque b */
+      __m256 vs1=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
+      __m128i hi=_mm_loadu_si128((const __m128i*)row); row+=16; /* bloque b+1 */
+      __m128i l0=_mm_and_si128(lo,mask0F), h0=_mm_and_si128(_mm_srli_epi16(lo,4),mask0F);
+      __m128i l1=_mm_and_si128(hi,mask0F), h1=_mm_and_si128(_mm_srli_epi16(hi,4),mask0F);
+      __m256i q0=_mm256_sub_epi8(_mm256_inserti128_si256(_mm256_castsi128_si256(l0),h0,1),sub8);
+      __m256i q1=_mm256_sub_epi8(_mm256_inserti128_si256(_mm256_castsi128_si256(l1),h1,1),sub8);
+      __m128i c0=_mm256_castsi256_si128(q0), c1=_mm256_extracti128_si256(q0,1);
+      __m128i c2=_mm256_castsi256_si128(q1), c3=_mm256_extracti128_si256(q1,1);
+      const f32 *xb = x + (size_t)b*32;
+      acc0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c0)),vs0),_mm256_loadu_ps(xb)  ,acc0);
+      acc1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(c0,8))),vs0),_mm256_loadu_ps(xb+8) ,acc1);
+      acc2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c1)),vs0),_mm256_loadu_ps(xb+16),acc2);
+      acc3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(c1,8))),vs0),_mm256_loadu_ps(xb+24),acc3);
+      const f32 *xb2 = xb+32;
+      acc0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c2)),vs1),_mm256_loadu_ps(xb2)  ,acc0);
+      acc1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(c2,8))),vs1),_mm256_loadu_ps(xb2+8) ,acc1);
+      acc2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c3)),vs1),_mm256_loadu_ps(xb2+16),acc2);
+      acc3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(c3,8))),vs1),_mm256_loadu_ps(xb2+24),acc3);
+    }
+    for(; b<nb; b++){
       f32 s = half_to_float(*(const u16*)row); row+=2;
       __m256 vs = _mm256_set1_ps(s);
       __m128i qs = _mm_loadu_si128((const __m128i*)row); row+=16;
-      /* byte j -> q[j] (nibble bajo), q[j+16] (nibble alto). Desempaquetar en orden q0..q31. */
-      __m128i ql = _mm_and_si128(qs, mask0F);            /* q0..q15 */
-      __m128i qh = _mm_and_si128(_mm_srli_epi16(qs,4), mask0F); /* q16..q31 */
-      __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(ql), qh, 1);
-      v = _mm256_sub_epi8(v, sub8);
-      __m128i lo = _mm256_castsi256_si128(v);
-      __m128i hi = _mm256_extracti128_si256(v,1);
+      __m128i ql = _mm_and_si128(qs, mask0F);
+      __m128i qh = _mm_and_si128(_mm_srli_epi16(qs,4), mask0F);
+      __m256i v = _mm256_sub_epi8(_mm256_inserti128_si256(_mm256_castsi128_si256(ql), qh, 1), sub8);
+      __m128i lo=_mm256_castsi256_si128(v), hi=_mm256_extracti128_si256(v,1);
       const f32 *xb = x + (size_t)b*32;
-      __m256 q0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)), vs);
-      __m256 q1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))), vs);
-      __m256 q2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)), vs);
-      __m256 q3=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))), vs);
-      acc0=_mm256_fmadd_ps(q0,_mm256_loadu_ps(xb+0 ),acc0);
-      acc1=_mm256_fmadd_ps(q1,_mm256_loadu_ps(xb+8 ),acc1);
-      acc2=_mm256_fmadd_ps(q2,_mm256_loadu_ps(xb+16),acc2);
-      acc3=_mm256_fmadd_ps(q3,_mm256_loadu_ps(xb+24),acc3);
+      acc0=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),vs),_mm256_loadu_ps(xb),acc0);
+      acc1=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))),vs),_mm256_loadu_ps(xb+8),acc1);
+      acc2=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),vs),_mm256_loadu_ps(xb+16),acc2);
+      acc3=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))),vs),_mm256_loadu_ps(xb+24),acc3);
     }
     float t[8];
     _mm256_storeu_ps(t,acc0); f32 s0=t[0]+t[1]+t[2]+t[3]+t[4]+t[5]+t[6]+t[7];

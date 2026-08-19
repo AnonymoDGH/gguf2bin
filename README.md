@@ -116,11 +116,13 @@ gcc -O2 -std=c99 -Iinclude -o gguf2bin2.exe \
 |-------|-------|
 | Escalar, 1 hilo | 0.7 |
 | AVX2, 1 hilo | 4.9 |
-| AVX2, 4 hilos (`--threads 4`) | **10.9** |
+| AVX2, 4 hilos (Q8) | 10.1 |
+| **AVX2, 4 hilos (Q4)** | **11.3** |
 
-El decode está limitado por cómputo/banda de memoria: `pack --q4` reduce los
-pesos a la mitad (335 MB vs 633 MB) con la misma velocidad aquí, pero permite
-encajar modelos **más grandes** en los mismos 2 GB.
+El decode está limitado por el kernel de matmul + ancho de banda de memoria. El
+kernel **Q4_0 optimizado (2 bloques/iteración)** iguala/supera a Q8 a la vez que
+los pesos usan la **mitad de RAM** (335 MB vs 633 MB). `pack --q4` da el mejor
+tok/s y deja espacio para modelos más grandes en los mismos 2 GB.
 
 ## Uso
 
