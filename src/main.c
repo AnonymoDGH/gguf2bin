@@ -24,6 +24,21 @@ static void set_threads(int n){
 #endif
 }
 
+static void apply_fast(int *nthr){
+#if defined(_OPENMP)
+  int maxc = omp_get_max_threads();
+  if(*nthr <= 0) *nthr = maxc;
+  omp_set_num_threads(*nthr);
+  omp_set_dynamic(0);
+#endif
+#if defined(_WIN32)
+  SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+#else
+  setpriority(PRIO_PROCESS, 0, -10);
+#endif
+  fprintf(stderr,"fast: prioridad alta, %d hilos, sin swap\n", *nthr);
+}
+
 typedef struct {
   i32 ids[RECENT_CAP];
   int n; /* total pushes; ring index = n % RECENT_CAP */
@@ -66,6 +81,7 @@ static void usage(const char *a0){
     "      --f32-kv           fuerza KV cache F32 (desactiva el auto-Q8 >1GB)\n"
     "      --max-ram MB       presupuesto RAM: auto-Q8 + baja ctx hasta caber (ej: 2048)\n"
     "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
+    "      --fast             exprime todo: prioridad alta, max hilos, sin swap\n"
     "      --threads N        numero de cores OpenMP (def: todos)\n\n"
     "Ejemplos:\n"
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
@@ -252,7 +268,7 @@ static int cmd_run(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
-  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
@@ -261,6 +277,7 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
     else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--fast")) fast=1;
     else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
@@ -277,8 +294,9 @@ static int cmd_run(int argc, char **argv){
     }
   }
   Model m; if(load_any(path,&m)) return 1;
-  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
-  if(nthr>0) set_threads(nthr);
+  { const char *sw = fast ? NULL : swap;
+    if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
+  if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
   if(text[0] && m.tok){
     i32 *enc; i32 en=tokenize_prefix(m.tok,text,&enc);
     if(en>0){
@@ -345,13 +363,14 @@ static int cmd_chat(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
-  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
     else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--fast")) fast=1;
     else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
@@ -361,8 +380,9 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
-  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
-  if(nthr>0) set_threads(nthr);
+  { const char *sw = fast ? NULL : swap;
+    if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
+  if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
   if(!m.tok){ fprintf(stderr,"chat: el modelo no trae tokenizer. Re-empaqueta\n"); model_free(&m); return 1; }
   Tokenizer *tk=m.tok;
   i32 im_start=find_tok(tk,"<|im_start|>"), im_end=find_tok(tk,"<|im_end|>");
@@ -452,19 +472,21 @@ static double now_sec(void){
 
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
-  i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
     else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--fast")) fast=1;
     else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
   }
   Model m; if(load_any(argv[2],&m)) return 1;
-  if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,swap)){ model_free(&m); return 1; }
-  if(nthr>0) set_threads(nthr);
+  { const char *sw = fast ? NULL : swap;
+    if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
+  if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
   model_forward(&m,1,0,logits);

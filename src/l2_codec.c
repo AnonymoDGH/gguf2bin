@@ -87,9 +87,11 @@ void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb = n/32;
   #pragma omp parallel for schedule(static)
   for(i32 i=0;i<d;i++){
-    const u8 *row = w + (size_t)i*(size_t)nb*34;
+    const u8 *row0 = w + (size_t)i*(size_t)nb*34;
     __m256 a0=_mm256_setzero_ps(), a1=_mm256_setzero_ps(), a2=_mm256_setzero_ps(), a3=_mm256_setzero_ps();
     for(i32 b=0;b<nb;b++){
+      const u8 *row = row0 + (size_t)b*34;
+      if(!(b&3)) _mm_prefetch(row + 4*34, _MM_HINT_T0);
       f32 s = half_to_float(*(const u16*)row); row+=2;
       __m256 vs = _mm256_set1_ps(s);
       __m256i q8 = _mm256_loadu_si256((const __m256i*)row); row+=32;
@@ -124,6 +126,7 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
     i32 b=0;
     const i32 nb2 = nb & ~1; /* pares: 2 bloques = 64 valores por iteracion */
     for(; b<nb2; b+=2){
+      _mm_prefetch(row + 9*18, _MM_HINT_T0);
       /* layout por bloque Q4_0: [scale f16][16 nibbles] = 18 B; 2 bloques seguidos */
       __m256 vs0=_mm256_set1_ps(half_to_float(*(const u16*)row)); row+=2;
       __m128i lo=_mm_loadu_si128((const __m128i*)row); row+=16; /* bloque b */
