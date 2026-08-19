@@ -216,23 +216,16 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   if(type==T_Q4_0){ matmul_q4_0(out,x,w,n,d); return; }
   if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
   if(type==T_F32){ matmul(out,x,(f32*)w,n,d); return; }
+  /* Fallback para tipos no fusionados (Q4_1, etc.): per-iteration alloc, sin UB OpenMP */
   u64 rs=row_stride(type,n);
-  /* Private per-row scratch: shared `row` would race under OpenMP. */
-  #pragma omp parallel
-  {
+  #pragma omp parallel for schedule(static)
+  for(i32 i=0;i<d;i++){
     f32 *tmp = (f32*)malloc((size_t)n * sizeof(f32));
-    if(!tmp){
-      #pragma omp for schedule(static)
-      for(i32 i=0;i<d;i++) out[i]=0.f;
-    } else {
-      #pragma omp for schedule(static)
-      for(i32 i=0;i<d;i++){
-        gguf_dequant(type, w+(size_t)i*rs, tmp, (u64)n);
-        f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
-        out[i]=s;
-      }
-      free(tmp);
-    }
+    if(!tmp){ out[i]=0.f; continue; }
+    gguf_dequant(type, w+(size_t)i*rs, tmp, (u64)n);
+    f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
+    out[i]=s;
+    free(tmp);
   }
   (void)row;
 }

@@ -152,7 +152,8 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
   }
   u64 cursor=0; for(u32 i=0;i<ns;i++){ slots[i].off=cursor; cursor=ALIGN64(cursor+slots[i].nbytes); } u64 data_size=cursor;
   FILE *o=fopen(out_path,"wb"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(src_off); gguf_free(&g); return -1; }
-  u16 ver=G2BX_VER; fwrite(G2BX_MAGIC,1,4,o); fwrite(&ver,2,1,o); fwrite(&arch,1,1,o); fwrite(&flags,1,1,o); fwrite(&c,sizeof c,1,o); fwrite(&ns,4,1,o); fwrite(slots,sizeof(Slot),ns,o);
+  u16 ver=G2BX_VER; u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
+  fwrite(G2BX_MAGIC,1,4,o); fwrite(&ver,2,1,o); fwrite(&arch,1,1,o); fwrite(&disk_flags,1,1,o); fwrite(&c,sizeof c,1,o); fwrite(&ns,4,1,o); fwrite(slots,sizeof(Slot),ns,o);
   u8 *zeros=calloc(64,1); u64 written=0;
   for(u32 i=0;i<ns;i++){
     while(written<slots[i].off){ u64 pad=slots[i].off-written; if(pad>64) pad=64; fwrite(zeros,1,(size_t)pad,o); written+=pad; }
@@ -175,6 +176,6 @@ int g2bx_info(const char *path){
   printf("  slots=%u\n",ns); Slot *sl=malloc(ns*sizeof(Slot)); fread(sl,sizeof(Slot),ns,f);
   static const char *rn[]={"tok_embd","out_norm","output","attn_norm","attn_q","attn_k","attn_v","attn_o","attn_q_norm","attn_k_norm","ffn_norm","ffn_gate","ffn_up","ffn_down"};
   u64 total=0; for(u32 i=0;i<ns;i++){ const char *r=sl[i].role<R_COUNT?rn[sl[i].role]:"?"; if(sl[i].layer==0xFFFF) printf("  [%u] %-12s global type=%u %u B off=%llu\n",i,r,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); else printf("  [%u] %-12s L%-4u type=%u %u B off=%llu\n",i,r,sl[i].layer,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); total+=sl[i].nbytes; }
-  printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(sl[ns-1].off+sl[ns-1].nbytes)); free(sl); fclose(f); return 0;
+  printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); free(sl); fclose(f); return 0;
 }
 int g2bx_read_cfg_gguf(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){ return read_cfg(g,c,arch,flags); }

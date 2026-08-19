@@ -6,6 +6,9 @@
 #include <math.h>
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <sys/resource.h>
+#include <time.h>
 #endif
 #if defined(_OPENMP)
 #include <omp.h>
@@ -335,12 +338,8 @@ static int cmd_run(int argc, char **argv){
       fprintf(stderr,"\nrun: contexto lleno (ctx=%d); stop\n", m.ctx);
       break;
     }
-    float *tmp=(float*)malloc((size_t)m.c.vocab*sizeof(float));
-    if(!tmp){ free(logits); model_free(&m); return 1; }
-    memcpy(tmp,logits,(size_t)m.c.vocab*sizeof(float));
     int rp_n = recent_snapshot(&recent, rep_tmp, RECENT_USE);
-    i32 next=sample_advanced(tmp,m.c.vocab,temp,top_k,top_p,rep_pen,rep_tmp,rp_n);
-    free(tmp);
+    i32 next=sample_advanced(logits,m.c.vocab,temp,top_k,top_p,rep_pen,rep_tmp,rp_n);
     if(m.tok){ i32 one=next; char *p=tok_decode(m.tok,&one,1); printf("%s",p); free(p); }
     else printf("%d ",next);
     fflush(stdout);
@@ -438,12 +437,8 @@ static int cmd_chat(int argc, char **argv){
         fprintf(stderr,"\nchat: contexto lleno; stop\n");
         break;
       }
-      float *tmp=malloc((size_t)m.c.vocab*sizeof(float));
-      if(!tmp) break;
-      memcpy(tmp,logits,(size_t)m.c.vocab*sizeof(float));
       int rp_n = recent_snapshot(&recent, rep_tmp, RECENT_USE);
-      i32 nxt=sample_advanced(tmp,m.c.vocab,temp,top_k,top_p,rep_pen,rep_tmp,rp_n);
-      free(tmp);
+      i32 nxt=sample_advanced(logits,m.c.vocab,temp,top_k,top_p,rep_pen,rep_tmp,rp_n);
       if(nxt==eos || nxt==im_end) break;
       i32 one=nxt; char *piece=tok_decode(tk,&one,1); printf("%s",piece); fflush(stdout); free(piece);
       recent_push(&recent, nxt);
@@ -466,7 +461,8 @@ static double now_sec(void){
   QueryPerformanceCounter(&c);
   return (double)c.QuadPart*inv;
 #else
-  return (double)clock()/CLOCKS_PER_SEC;
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec*1e-9;
 #endif
 }
 

@@ -48,10 +48,11 @@ static void shash_grow(SHash *h){
 }
 static void shash_put(SHash *h, const char *k, i32 v){
   if(!h || !h->k || !k) return;
-  shash_grow(h);
-  u32 i=shash_hash(k)&h->mask;
-  while(h->k[i]){ if(!strcmp(h->k[i],k)){ h->v[i]=v; return; } i=(i+1)&h->mask; }
-  h->k[i]=strdup(k); h->v[i]=v; h->cnt++;
+  for(;;){ shash_grow(h); u32 i=shash_hash(k)&h->mask;
+    while(h->k[i]){ if(!strcmp(h->k[i],k)){ h->v[i]=v; return; } i=(i+1)&h->mask; }
+    h->k[i]=strdup(k); if(!h->k[i]) continue; /* OOM: grow y reintenta */
+    h->v[i]=v; h->cnt++; return;
+  }
 }
 static i32 shash_get(SHash *h, const char *k){
   if(!h||!h->k||!k) return -1;
@@ -123,7 +124,11 @@ char *tok_decode(Tokenizer *t, const i32 *ids, i32 n){
   size_t cap=256, len=0; char *out=malloc(cap);
   for(i32 i=0;i<n;i++){ const char *s=(ids[i]>=0&&ids[i]<t->n&&t->tok[ids[i]])?t->tok[ids[i]]:""; size_t sl=strlen(s); while(len+sl+1>cap){ cap*=2; out=realloc(out,cap); } memcpy(out+len,s,sl); len+=sl; }
   out[len]=0; size_t bcap=len+1; char *res=malloc(bcap); size_t rl=0; size_t i=0;
-  while(i<len){ u8 c=(u8)out[i]; u32 cp; int adv; if(c<0x80){ cp=c; adv=1; } else if((c&0xE0)==0xC0){ cp=((c&0x1F)<<6)|((u8)out[i+1]&0x3F); adv=2; } else if((c&0xF0)==0xE0){ cp=((c&0x0F)<<12)|(((u8)out[i+1]&0x3F)<<6)|((u8)out[i+2]&0x3F); adv=3; } else { cp=c; adv=1; } i+=adv; u8 b = (cp<=288)? u2b[cp] : (u8)cp; if(rl+1>=bcap){ bcap*=2; res=realloc(res,bcap); } res[rl++]=(char)b; }
+  while(i<len){ u8 c=(u8)out[i]; u32 cp; int adv;
+    if(c<0x80){ cp=c; adv=1; }
+    else if((c&0xE0)==0xC0 && i+1<len){ cp=((c&0x1F)<<6)|((u8)out[i+1]&0x3F); adv=2; }
+    else if((c&0xF0)==0xE0 && i+2<len){ cp=((c&0x0F)<<12)|(((u8)out[i+1]&0x3F)<<6)|((u8)out[i+2]&0x3F); adv=3; }
+    else { cp=c; adv=1; } i+=adv; u8 b = (cp<=288)? u2b[cp] : (u8)cp; if(rl+1>=bcap){ bcap*=2; res=realloc(res,bcap); } res[rl++]=(char)b; }
   res[rl]=0; free(out); return res;
 }
 i32 tok_id(Tokenizer *t, const char *s){ return shash_get(t->vocab, s); }

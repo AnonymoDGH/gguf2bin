@@ -14,6 +14,11 @@
 
 #define G2BX_MAGIC "G2BX"
 #define ALIGN64(x) (((x)+63ull)&~63ull)
+#if defined(_WIN32)
+#define fseek64 _fseeki64
+#else
+#define fseek64(f, off, whence) fseeko(f, (off_t)(off), whence)
+#endif
 
 u8 *slot_ptr(Model *m, Slot *s){ return s? m->data+s->off : NULL; }
 
@@ -116,7 +121,7 @@ static int alloc_rt(Model *m, i32 ctx){
   int q8=(m->flags&F_KV_Q8)?1:0;
   i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
   i32 nbuf=dim*3 + hid*2 + nq + nkv*2 + c->n_heads*ctx + maxn;
-  m->buf=calloc((size_t)nbuf,sizeof(f32));
+  m->buf=malloc((size_t)nbuf*sizeof(f32)); /* no calloc: se sobreescribe antes de leer */
   m->kvrow=malloc((size_t)nkv*sizeof(f32));
   if(!m->buf || !m->kvrow) return -1;
   size_t half = 0, usize = 0;
@@ -146,6 +151,7 @@ int model_enable_swap(Model *m, const char *path){
   if(!m || !path || !*path) return -1;
   free(m->swap_path); m->swap_path=NULL;
   m->swap_path=strdup(path);
+  if(!m->swap_path){ fprintf(stderr,"swap: OOM\n"); return -1; }
   if(m->ctx>0) {
     if(model_set_ctx(m,m->ctx)){ free(m->swap_path); m->swap_path=NULL; return -1; }
   }
@@ -292,7 +298,12 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   u64 aligned_end=ALIGN64(max_end);
   m->data_size=(size_t)aligned_end;
 
-  long header_end = ftell(f);
+  i64 header_end;
+# if defined(_WIN32)
+  header_end = _ftelli64(f);
+# else
+  header_end = (i64)ftello(f);
+# endif
   if(header_end < 0) return -1;
 
   int used_mmap = 0;
@@ -317,7 +328,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
               m->use_mmap = 1;
               used_mmap = 1;
               /* tokenizer starts after weight blob */
-              fseek(f, header_end + (long)m->data_size, SEEK_SET);
+              fseek64(f, header_end + (i64)m->data_size, SEEK_SET);
             } else {
               UnmapViewOfFile(view); CloseHandle(hm); CloseHandle(hf);
               m->file_handle=m->map_handle=m->map_view=NULL; m->map_size=0;
@@ -343,7 +354,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
             m->own_data = 0;
             m->use_mmap = 1;
             used_mmap = 1;
-            fseek(f, header_end + (long)m->data_size, SEEK_SET);
+            fseek64(f, header_end + (i64)m->data_size, SEEK_SET);
           } else {
             munmap(view, (size_t)st.st_size); close(fd);
             m->fd=-1; m->map_view=NULL; m->map_size=0;

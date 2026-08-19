@@ -45,7 +45,11 @@ int gguf_load(const char *path, GGUF *g){
   memset(g,0,sizeof *g);
   FILE *f=fopen(path,"rb");
   if(!f){ fprintf(stderr,"gguf: no abro %s\n",path); return -1; }
-  fseek(f,0,SEEK_END); g->size=(size_t)ftell(f); fseek(f,0,SEEK_SET);
+# if defined(_WIN32)
+  _fseeki64(f,0,SEEK_END); g->size=(size_t)_ftelli64(f); _fseeki64(f,0,SEEK_SET);
+# else
+  fseeko(f,0,SEEK_END); g->size=(size_t)ftello(f); fseeko(f,0,SEEK_SET);
+# endif
   g->data=malloc(g->size);
   if(!g->data||fread(g->data,1,g->size,f)!=g->size){ fclose(f); free(g->data); return -1; }
   fclose(f);
@@ -62,15 +66,18 @@ int gguf_load(const char *path, GGUF *g){
     u32 vt=ru32(p); p+=4;
     if(klen==16 && !memcmp(key,"general.alignment",16))
       g->alignment=(u64)meta_i(p,vt);
+    if(!g->alignment) g->alignment=32; /* defensivo */
     p=skip_val(p,vt);
   }
   g->t=calloc(g->n_tensors,sizeof(GTensor));
   if(!g->t) return -1;
-  for(u64 i=0;i<g->n_tensors;i++){
+for(u64 i=0;i<g->n_tensors;i++){
     u64 nlen=ru64(p); p+=8;
-    g->t[i].name=malloc(nlen+1);
-    memcpy(g->t[i].name,p,nlen); g->t[i].name[nlen]=0; p+=nlen;
+    if(nlen>1024){ fprintf(stderr,"gguf: nombre de tensor corrupto (nlen=%llu)\n",(unsigned long long)nlen); free(g->t); g->t=NULL; return -1; }
+    g->t[i].name=malloc((size_t)nlen+1);
+    memcpy(g->t[i].name,p,(size_t)nlen); g->t[i].name[nlen]=0; p+=(size_t)nlen;
     g->t[i].n_dims=ru32(p); p+=4;
+    if(g->t[i].n_dims>6){ fprintf(stderr,"gguf: dims=%u (corrupto)\n",g->t[i].n_dims); free(g->t[i].name); free(g->t); g->t=NULL; return -1; }
     g->t[i].dims=malloc(g->t[i].n_dims*sizeof(u64));
     for(u32 d=0;d<g->t[i].n_dims;d++){ g->t[i].dims[d]=ru64(p); p+=8; }
     g->t[i].type  =ru32(p); p+=4;

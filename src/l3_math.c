@@ -27,14 +27,15 @@ void softmax(f32 *x, i32 n){
 }
 void silu(f32 *x, i32 n){ for(i32 i=0;i<n;i++) x[i]=x[i]/(1.f+expf(-x[i])); }
 
-/* LLaMA style RoPE: rotate adjacent pairs (0,1), (2,3)... — frecuencias precomputadas */
+/* LLaMA style RoPE: rotate adjacent pairs (0,1), (2,3)... — frecuencias precomputadas sin powf en loop */
 void rope_th_llama(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
   i32 half=head_dim/2;
-  f32 cs[1024]; /* cos/sin por par, cabeceras hasta 512 dims */
+  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (no soportado)\n",head_dim); return; }
+  f32 cs[1024];
+  f32 inv_step = powf(theta, -1.0f/(f32)head_dim);
+  f32 freq = 1.0f;
   for(i32 i=0;i<half;i++){
-    f32 freq=powf(theta, -(f32)i/(f32)head_dim);
-    f32 ang=(f32)pos*freq;
-    cs[2*i]=cosf(ang); cs[2*i+1]=sinf(ang);
+    f32 ang=(f32)pos*freq; cs[2*i]=cosf(ang); cs[2*i+1]=sinf(ang); freq*=inv_step;
   }
   for(i32 h=0;h<len;h+=head_dim){
     i32 pair=0;
@@ -45,14 +46,15 @@ void rope_th_llama(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
     }
   }
 }
-/* NEOX style RoPE: rotate half-split pairs (0, D/2), (1, D/2+1)... — Qwen3, Qwen2, etc. */
+/* NEOX style RoPE: rotate half-split pairs (0, D/2), (1, D/2+1)... */
 void rope_th_neox(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
   i32 half = head_dim/2;
+  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (no soportado)\n",head_dim); return; }
   f32 cs[1024];
+  f32 inv_step = powf(theta, -2.0f/(f32)head_dim);
+  f32 freq = 1.0f;
   for(i32 j=0;j<half;j++){
-    f32 freq=powf(theta, (f32)(-2*j)/(f32)head_dim);
-    f32 ang=(f32)pos*freq;
-    cs[2*j]=cosf(ang); cs[2*j+1]=sinf(ang);
+    f32 ang=(f32)pos*freq; cs[2*j]=cosf(ang); cs[2*j+1]=sinf(ang); freq*=inv_step;
   }
   for(i32 h=0;h<len;h+=head_dim){
     for(i32 j=0;j<half;j++){
