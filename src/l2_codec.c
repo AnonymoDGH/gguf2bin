@@ -471,8 +471,6 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
     }
     Q4_ROW_HSUM(accA,out+i);
   }
-#undef Q4_BLK_ACC
-#undef Q4_ROW_HSUM
 }
 /* Batcheado para prefill: x es [B][n], out es [B][d]; cada fila de W se lee
    una vez y se reusa para los B tokens (aritmética intensiva en B). */
@@ -492,27 +490,32 @@ void matmul_q4_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
   for(i32 i=0;i<d;i++){
     const u8 *row0 = w + (size_t)i*(size_t)nb*18;
     for(i32 t=0;t<B;t++){
-      const u8 *row = row0;
-      f32 s0=0.f,s1=0.f,s2=0.f,s3=0.f;
+      const u8 *pa=row0;
+      const u8 *qa=q8+(size_t)t*n;
+      __m256 acc=_mm256_setzero_ps();
       i32 b=0;
       for(; b+3<nb; b+=4){
-        f32 dd0=half_to_float(*(const u16*)row); row+=2; __m128i q0=_mm_loadu_si128((const __m128i*)row); row+=16;
-        f32 dd1=half_to_float(*(const u16*)row); row+=2; __m128i q1=_mm_loadu_si128((const __m128i*)row); row+=16;
-        f32 dd2=half_to_float(*(const u16*)row); row+=2; __m128i q2=_mm_loadu_si128((const __m128i*)row); row+=16;
-        f32 dd3=half_to_float(*(const u16*)row); row+=2; __m128i q3=_mm_loadu_si128((const __m128i*)row); row+=16;
-        s0 += q4_dot_block(q0,q8+(size_t)t*n+(size_t)b*32,     dd0,q8d[(size_t)t*nb+b],   mask0F,ones8,ones16,eight16);
-        s1 += q4_dot_block(q1,q8+(size_t)t*n+(size_t)(b+1)*32, dd1,q8d[(size_t)t*nb+b+1], mask0F,ones8,ones16,eight16);
-        s2 += q4_dot_block(q2,q8+(size_t)t*n+(size_t)(b+2)*32, dd2,q8d[(size_t)t*nb+b+2], mask0F,ones8,ones16,eight16);
-        s3 += q4_dot_block(q3,q8+(size_t)t*n+(size_t)(b+3)*32, dd3,q8d[(size_t)t*nb+b+3], mask0F,ones8,ones16,eight16);
+        _mm_prefetch(pa+(b+72)*18,_MM_HINT_T0);
+        Q4_BLK_ACC(pa,(size_t)b*18   ,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),
+                  (f32)half_to_float(*(const u16*)(pa+(size_t)b*18   ))*q8d[(size_t)t*nb+b]  ,acc);
+        Q4_BLK_ACC(pa,(size_t)b*18+18,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+1)*32)),
+                  (f32)half_to_float(*(const u16*)(pa+(size_t)b*18+18))*q8d[(size_t)t*nb+b+1],acc);
+        Q4_BLK_ACC(pa,(size_t)b*18+36,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+2)*32)),
+                  (f32)half_to_float(*(const u16*)(pa+(size_t)b*18+36))*q8d[(size_t)t*nb+b+2],acc);
+        Q4_BLK_ACC(pa,(size_t)b*18+54,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+3)*32)),
+                  (f32)half_to_float(*(const u16*)(pa+(size_t)b*18+54))*q8d[(size_t)t*nb+b+3],acc);
       }
       for(; b<nb; b++){
-        f32 dd0=half_to_float(*(const u16*)row); row+=2; __m128i q0=_mm_loadu_si128((const __m128i*)row); row+=16;
-        s0 += q4_dot_block(q0,q8+(size_t)t*n+(size_t)b*32,dd0,q8d[(size_t)t*nb+b],mask0F,ones8,ones16,eight16);
+        const u8 *p_=pa+(size_t)b*18;
+        Q4_BLK_ACC(p_,0,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),
+                   (f32)half_to_float(*(const u16*)p_)*q8d[(size_t)t*nb+b],acc);
       }
-      out[(size_t)t*d+i]=s0+s1+s2+s3;
+      Q4_ROW_HSUM(acc,out+(size_t)t*d+i);
     }
   }
 }
+#undef Q4_BLK_ACC
+#undef Q4_ROW_HSUM
 /* ── K-quant fused dots (sin dequantizar la fila) ── */
 /* dos mitades de 16 bytes → 32 nibbles contiguos dot contra 32 bytes s8 */
 static inline i32 nib_dot2(const __m128i pa, const __m128i pb, const u8 *act){

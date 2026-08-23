@@ -86,6 +86,12 @@ $ gguf2bin2 chat qwen.g2bx --no-think --swap --threads 4
 | Logits (vocab×4B) | Yes (~1 MB × 250k) | — |
 
 
+
+## v4.5 changes
+
+- Kernel batched (prefill) con acumulacion diferida: mismo trato que el kernel
+  de decode. Prefill del Qwen2.5-3B: 4.3 -> 7.8 tok/s (+81%), bit-exacto
+  (tools/prefilltest). Deja listo el terreno para verificacion especulativa.
 ## v4.4 changes
 
 - **--drop N (ShortGPT)**: mide Block Influence (1-cos entrada/salida) por bloque
