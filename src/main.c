@@ -593,6 +593,7 @@ static int cmd_chat(int argc, char **argv){
   if(!conv){ free(logits); model_free(&m); return 1; }
 #define PUSH(x) do{ if(cn>=ccap){ ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
   i32 sys_len=0;
+  if(tk->bos>=0) PUSH(tk->bos); /* LFM2.5 exige <|startoftext|> al inicio */
   {
     i32 *st; i32 sn=tok_encode(tk,"system\nYou are a helpful assistant.",&st);
     PUSH(im_start); for(i32 i=0;i<sn;i++) PUSH(st[i]); PUSH(im_end);
