@@ -42,3 +42,13 @@ Anadir SO-DIMM DDR3L-1600 en ChannelA => dual channel (~19-20 GB/s reales)
 3. Shortlist head 2 niveles (top-4096 tokens = 85-92% emisiones): 8-11%
 4. Large pages para pesos (MEM_LARGE_PAGES + SeLockMemoryPrivilege): 2-5%
 5. INT8 activations en todos los kernels: habilita k=6-8 especulativo
+# Backend GPU (R5 M330 / Vulkan) — diseño para próxima sesión
+Objetivo: pesos residentes en los 2GB VRAM (~15 GB/s > canal unico RAM).
+Fases: (1) loader Vulkan minimo: buffers de pesos por slot en device-local
+heap; (2) compute shader GEMV Q4_0S (1 workgroup por fila, nibbles via
+unpack); (3) pipeline por bloque LFM2 (conv/att), sincronizando x en VRAM;
+(4) transferencia inicial una vez al arrancar (595MB PCIe ~2-4s, solo 1 vez);
+(5) fallback automatico CPU si Vulkan<1.2 o OOM.
+Riesgos: driver AMD 2022 GCN1 (soporte minimo), validar con triangulo de
+prueba antes de portar los 6 kernels. Estimacion honesta: 2-3 sesiones.
+Alternativa ya existente hoy: llama.cpp -DGGML_VULKAN=ON con el GGUF original.
