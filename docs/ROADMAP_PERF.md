@@ -61,3 +61,17 @@ Rutas: actualizar driver AMD/Radeon Settings; probar llama.cpp-Vulkan (mismo
 riesgo); o hardware: SO-DIMM canal A (x2 garantizado, sin driver que cuelgue).
 El codigo de sonda queda en src/l7_vulkan.c + comando vkinfo para retestear
 tras actualizar drivers.
+## Actualizacion diagnostico Vulkan
+Comportamiento INESTABLE confirmado: 3 corridas seguidas salen silenciosas
+sin enumerar dispositivos; antes colgaba en vkCreateInstance. Sintoma clasico
+de conflictos ICD en laptops hibridas con drivers viejos (AMD 27.20 ago-2022,
+Intel 30.0.101 feb-2022).
+
+Plan para el usuario (fuera del codigo):
+1. Actualizar driver AMD (Adrenalin actual soporta R5 M330).
+2. Revisar JSONs ICD en C:\Windows\System32\DriverStore y registro
+   HKLM\SOFTWARE\Khronos\Vulkan\Drivers.
+3. Retest: gguf2bin2.exe vkinfo  (sonda conservada en src/l7_vulkan.c)
+4. Cross-check independiente: binario llama.cpp-Vulkan oficial — si tambien
+   falla, es 100% sistema/driver.
+Mientras tanto el runtime CPU (15.9 tok/s q4s) no depende de nada de esto.
