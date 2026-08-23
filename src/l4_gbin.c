@@ -127,11 +127,24 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   return out;
 }
 int g2bx_pack(const char *gguf_path, const char *out_path){
-  return g2bx_pack_ex(gguf_path, out_path, 0);
+  return g2bx_pack_prune(gguf_path, out_path, 0, 0.f);
 }
 int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
+  return g2bx_pack_prune(gguf_path, out_path, downq4, 0.f);
+}
+
+/* ── Poda estructurada FFN (efecto MoE sin reentrenar) ──
+   Con calib_scores [n_layers x hidden] (de model_collect_stats) usa importancia
+   real por activación; si es NULL, proxy Σ|gate·up| por pesos.
+   Se eliminan grupos de G neuronas alineados a bloques de cuantización. */
+int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, float prune){
+  return g2bx_pack_prune_scores(gguf_path,out_path,downq4,prune,NULL);
+}
+int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
+                           int downq4, float prune, const f32 *calib){
   GGUF g; if(gguf_load(gguf_path,&g)) return -1;
   ModelCfg c; u8 arch, flags; if(read_cfg(&g,&c,&arch,&flags)){ gguf_free(&g); return -1; }
+  if(!(prune>0.001f) || prune>=0.9f || c.hidden_dim<=0){ prune=0.f; }
   Slot *slots=calloc(g.n_tensors,sizeof(Slot)); u32 ns=0;
   u64 *ne_arr=calloc(g.n_tensors,sizeof(u64)); u8 **src_ptr=calloc(g.n_tensors,sizeof(u8*)); u32 *src_sz=calloc(g.n_tensors,sizeof(u32)); u8 **conv_ptr=calloc(g.n_tensors,sizeof(u8*));
   if(!slots||!ne_arr||!src_ptr||!src_sz||!conv_ptr){
@@ -140,7 +153,6 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
   u32 skipped_unknown=0, skipped_type=0;
   for(u64 i=0;i<g.n_tensors;i++){
     u8 role; u16 layer; if(parse_name(g.t[i].name,&role,&layer)){ skipped_unknown++; continue; }
-    /* Runtime only dequants F32/F16/Q4_0/Q4_1/Q8_0 (and packs F32/F16→Q4_0). */
     u32 ty=g.t[i].type;
     if(ty!=T_F32 && ty!=T_F16 && ty!=T_Q4_0 && ty!=T_Q4_1 && ty!=T_Q5_0 && ty!=T_Q8_0
      && ty!=T_Q2_K && ty!=T_Q3_K && ty!=T_Q4_K && ty!=T_Q5_K && ty!=T_Q6_K && ty!=T_Q8_K){
@@ -152,12 +164,11 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
     src_ptr[ns]=gguf_tensor_ptr(&g,&g.t[i]); src_sz[ns]=nbytes; ne_arr[ns]=ne; ns++;
   }
   if(skipped_type)
-    fprintf(stderr,"g2bx: %u tensores omitidos por tipo no soportado (Q1/Q2_K/Q3_K/...)\n", skipped_type);
+    fprintf(stderr,"g2bx: %u tensores omitidos por tipo no soportado\n", skipped_type);
   if(!ns){ fprintf(stderr,"g2bx: 0 tensores reconocidos\n"); free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
   { int has_embd=0; for(u32 i=0;i<ns;i++) if(slots[i].role==R_TOK_EMBD){ has_embd=1; break; }
     if(!has_embd)
-      fprintf(stderr,"g2bx: AVISO — sin token_embd.weight: modelo draft/decode-only "
-        "(speculative decoding); no puede generar texto standalone (le faltan pesos del teacher)\n");
+      fprintf(stderr,"g2bx: AVISO — sin token_embd.weight: modelo draft/decode-only\n");
   }
   for(u32 a=0;a<ns;a++) for(u32 b=a+1;b<ns;b++){
     int la=slots[a].layer==0xFFFF?-1:(int)slots[a].layer; int lb=slots[b].layer==0xFFFF?-1:(int)slots[b].layer;
@@ -165,10 +176,132 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4){
       Slot ts=slots[a]; slots[a]=slots[b]; slots[b]=ts; u8 *tp=src_ptr[a]; src_ptr[a]=src_ptr[b]; src_ptr[b]=tp; u32 tz=src_sz[a]; src_sz[a]=src_sz[b]; src_sz[b]=tz; u64 tn=ne_arr[a]; ne_arr[a]=ne_arr[b]; ne_arr[b]=tn;
     }
   }
-  /* FIX: preservar Q8_0/Q4_0; convertir F32/F16 -> Q4_0 (y Q8_0 -> Q4_0 si downq4, ~2x mas rapido) */
+
+  /* ── poda FFN por capas ── */
+  if(prune>0.f){
+    const i32 dim=c.dim, hidden=c.hidden_dim;
+    u32 G=32;
+    for(i32 L=0;L<c.n_layers && G==32;L++){
+      /* granularidad = mayor block_size entre los tres tensores */
+      for(u32 i=0;i<ns;i++){
+        if(slots[i].layer==(u16)L &&
+           (slots[i].role==R_FFN_GATE||slots[i].role==R_FFN_UP||slots[i].role==R_FFN_DOWN)){
+          u64 bs=ggml_block_size(slots[i].type);
+          if(bs>G) G=(u32)bs;
+        }
+      }
+    }
+    if(hidden%G || dim%G){
+      fprintf(stderr,"prune: hidden=%d no alineado a %u — poda desactivada\n",hidden,G);
+      prune=0.f;
+    } else {
+      u32 nblk_total=hidden/G;
+      u32 keep=nblk_total-(u32)(nblk_total*prune+0.5f);
+      if(keep<2) keep=2;
+      u8 *kept=malloc((size_t)hidden);
+      f32 *grow=malloc((size_t)dim*sizeof(f32)), *urw=malloc((size_t)dim*sizeof(f32));
+      u64 *bscore=malloc((size_t)nblk_total*sizeof(u64));
+      u32 *order=malloc((size_t)nblk_total*sizeof(u32));
+      if(!kept||!grow||!urw||!bscore||!order){
+        fprintf(stderr,"prune: OOM — desactivada\n"); prune=0.f;
+      } else {
+        i32 new_hidden=(i32)(keep*(u32)G);
+        u64 old_bytes=0,new_bytes=0;
+        for(i32 L=0;L<c.n_layers;L++){
+          Slot *sg=NULL,*su=NULL,*sd=NULL;
+          for(u32 i=0;i<ns;i++){
+            if(slots[i].layer!=(u16)L) continue;
+            if(slots[i].role==R_FFN_GATE) sg=&slots[i];
+            else if(slots[i].role==R_FFN_UP) su=&slots[i];
+            else if(slots[i].role==R_FFN_DOWN) sd=&slots[i];
+          }
+          if(!sg||!su||!sd) continue;
+          i32 ig=-1,iu=-1,id_=-1;
+          for(u32 i=0;i<ns;i++){
+            if(&slots[i]==sg) ig=(i32)i;
+            else if(&slots[i]==su) iu=(i32)i;
+            else if(&slots[i]==sd) id_=(i32)i;
+          }
+          const u8 *gp=src_ptr[ig], *up=src_ptr[iu], *dp=src_ptr[id_];
+          u32 tg=sg->type, tu=su->type, td=sd->type;
+          size_t grs=ggml_type_size(tg,(u64)dim), urs=ggml_type_size(tu,(u64)dim);
+          size_t drs_old=ggml_type_size(td,(u64)hidden), drb=ggml_type_bytes(td);
+          /* scoring: activaciones calibradas (preferente) o proxy de pesos */
+          if(calib){
+            for(u32 k=0;k<nblk_total;k++){
+              u64 acc=0;
+              for(u32 j=0;j<G;j++){
+                f32 v=calib[(size_t)L*(size_t)hidden + (size_t)k*G+j];
+                acc+=(u64)(v*65536.f);
+              }
+              bscore[k]=acc;
+            }
+          } else {
+            memset(bscore,0,(size_t)nblk_total*sizeof(u64));
+            for(i32 hrow=0;hrow<hidden;hrow++){
+              gguf_dequant(tg,gp+(size_t)hrow*grs,grow,(u64)dim);
+              gguf_dequant(tu,up+(size_t)hrow*urs,urw,(u64)dim);
+              u64 acc=bscore[hrow/G];
+              for(i32 j=0;j<dim;j++) acc+=(u64)(fabsf(grow[j]*urw[j])*4096.f);
+              bscore[hrow/G]=acc;
+            }
+          }
+          for(u32 k=0;k<nblk_total;k++) order[k]=k;
+          /* selección top-keep por score (inserción parcial simple: qsort) */
+          for(u32 a=0;a+1<nblk_total;a++){ /* insertion sort descendente por score */
+            u32 best=a;
+            for(u32 b2=a+1;b2<nblk_total;b2++) if(bscore[order[b2]]>bscore[order[best]]) best=b2;
+            if(best!=a){ u32 t=order[a]; order[a]=order[best]; order[best]=t; }
+            if(a>=keep) break; /* solo se necesitan los keep primeros */
+          }
+          memset(kept,0,(size_t)hidden);
+          for(u32 k=0;k<keep;k++){ u32 blk=order[k]; for(u32 j=0;j<G;j++) kept[blk*G+j]=1; }
+          /* rebuild gate/up: copia de runs de filas */
+          u8 *ng=malloc((size_t)new_hidden*grs), *nu=malloc((size_t)new_hidden*urs);
+          u8 *nd=malloc((size_t)dim*(size_t)new_hidden/G*drb);
+          if(!ng||!nu||!nd){ fprintf(stderr,"prune: OOM en capa %d\n",L); free(ng);free(nu);free(nd); break; }
+          /* gate/up: las filas kept se copian por runs contiguos */
+          { u32 i=0; u32 dst=0;
+            while(i<(u32)hidden){
+              while(i<(u32)hidden && !kept[i]) i++;
+              if(i>=(u32)hidden) break;
+              u32 r=i; while(r<(u32)hidden && kept[r]) r++;
+              memcpy(ng+(size_t)dst*grs, gp+(size_t)i*grs, (size_t)(r-i)*grs);
+              memcpy(nu+(size_t)dst*urs, up+(size_t)i*urs, (size_t)(r-i)*urs);
+              dst+=r-i; i=r;
+            }
+          }
+          /* down [dim,hidden]: por fila, copiar los bloques kept del eje interno */
+          { u32 nb_in=(u32)hidden/G;
+            for(i32 r=0;r<dim;r++){
+              const u8 *srow=dp+(size_t)r*drs_old;
+              u8 *drow=nd+(size_t)r*((size_t)keep*drb);
+              u32 dst=0;
+              for(u32 k=0;k<nb_in;k++) if(kept[(size_t)k*G]) { memcpy(drow+(size_t)dst*drb, srow+(size_t)k*drb, drb); dst++; }
+            }
+          }
+          conv_ptr[ig]=ng; src_ptr[ig]=ng; src_sz[ig]=(u32)((size_t)new_hidden*grs);
+          ne_arr[ig]=(u64)new_hidden*(u64)dim;
+          sg->nbytes=src_sz[ig];
+          conv_ptr[iu]=nu; src_ptr[iu]=nu; src_sz[iu]=(u32)((size_t)new_hidden*urs);
+          ne_arr[iu]=(u64)new_hidden*(u64)dim;
+          su->nbytes=src_sz[iu];
+          conv_ptr[id_]=nd; src_ptr[id_]=nd; src_sz[id_]=(u32)((size_t)dim*(size_t)new_hidden/G*drb);
+          ne_arr[id_]=(u64)dim*(u64)new_hidden;
+          sd->nbytes=src_sz[id_];
+          old_bytes+=grs*(size_t)hidden+urs*(size_t)hidden+drs_old*(size_t)dim;
+          new_bytes+=grs*(size_t)new_hidden+urs*(size_t)new_hidden+(size_t)dim*(size_t)new_hidden/G*drb;
+        }
+        c.hidden_dim=new_hidden;
+        fprintf(stderr,"prune: FFN %d -> %d (-%.0f%%): pesos %.0f MB -> %.0f MB\n",
+          hidden,new_hidden,100.f*prune,old_bytes/1048576.f,new_bytes/1048576.f);
+        free(kept); free(grow); free(urw); free(bscore); free(order);
+      }
+    }
+  }
+
   /* FIX v3.4: F32/F16->Q4_0 siempre; con --q4 TODOS los tensores de peso
-     (Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K) se convierten a Q4_0 fusionado
-     para que matmul_q use el kernel SIMD rapido (nunca el dequant lento). */
+     se convierten a Q4_0 fusionado para el kernel SIMD rápido. */
   for(u32 i=0;i<ns;i++){
     int conv = 0;
     if(is_weight_role(slots[i].role)){

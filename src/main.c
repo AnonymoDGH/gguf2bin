@@ -65,7 +65,9 @@ static int recent_snapshot(const RecentBuf *r, i32 *out, int maxn){
 static void usage(const char *a0){
   fprintf(stderr,
     "gguf2bin2 — GGUF -> G2BX (formato propio) -> inferencia Qwen3/Llama\n\n"
-    "  %s pack   <model.gguf> <out.g2bx> [--q4]\n"
+    "  %s pack   <model.gguf> <out.g2bx> [--q4] [--prune F]\n"
+    "                     --prune 0.5  poda el 50%% del FFN por importancia\n"
+    "                     (efecto MoE: menos pesos/token -> más tok/s)\n"
     "  %s info   <model.g2bx|gguf>\n"
     "  %s run    <model> [texto] [opts]\n"
     "      -n N          tokens a generar (def 64)\n"
@@ -108,10 +110,61 @@ static int load_any(const char *path, Model *m){
   if(is_g2bx(path)) return model_load_g2bx(path,m);
   return model_load_gguf(path,m);
 }
+/* corpus genérico embebido para calibrar la poda si no se da --calib */
+static const char *DEFAULT_CALIB =
+  "The city council approved the new budget on Tuesday after months of debate. "
+  "Residents expressed concerns about traffic congestion and public transportation. "
+  "El ayuntamiento aprobó el nuevo presupuesto después de meses de debate. "
+  "Scientists published a study showing that ocean temperatures have risen steadily. "
+  "The engineer designed a circuit that reduces power consumption by forty percent. "
+  "In the morning she reads the news while drinking coffee near the window. "
+  "Machine learning models transform input vectors through many matrix multiplications. "
+  "Los estudiantes caminaron por la plaza hasta la biblioteca central del campus. "
+  "A river runs through the valley, feeding the fields where farmers grow wheat. "
+  "The report recommends investing in renewable energy and modernizing the grid. "
+  "Every weekend the market fills with people buying fruit, bread and flowers. "
+  "Software updates usually fix bugs but sometimes introduce new problems. ";
+
 static int cmd_pack(int argc, char **argv){
   if(argc<4){ usage(argv[0]); return 1; }
-  int downq4 = (argc>4 && !strcmp(argv[4],"--q4")) || (argc>5 && !strcmp(argv[5],"--q4"));
-  return g2bx_pack_ex(argv[2],argv[3],downq4)?1:0;
+  int downq4=0; float prune=0.f; const char *calib_file=NULL;
+  for(int i=4;i<argc;i++){
+    if(!strcmp(argv[i],"--q4")) downq4=1;
+    else if(!strcmp(argv[i],"--prune")&&i+1<argc) prune=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--calib")&&i+1<argc) calib_file=argv[++i];
+  }
+  if(prune>0.f && (prune<=0.001f||prune>=0.9f)){ fprintf(stderr,"pack: --prune debe estar en (0,0.9)\n"); return 1; }
+  if(prune<=0.f) return g2bx_pack_prune(argv[2],argv[3],downq4,0.f)?1:0;
+
+  /* dos fases: pack completo -> calibrar activaciones -> repack podado */
+  char tmp[1280];
+  snprintf(tmp,sizeof tmp,"%s.calib.g2bx",argv[3]);
+  fprintf(stderr,"pack: fase 1/2 — pack completo para calibrar\n");
+  if(g2bx_pack_prune(argv[2],tmp,downq4,0.f)){ remove(tmp); return 1; }
+  Model m;
+  if(model_load_g2bx(tmp,&m)){ remove(tmp); return 1; }
+  i32 maxtok=768; i32 ctx=m.c.seq_len>0?(m.c.seq_len<maxtok?m.c.seq_len:maxtok):maxtok;
+  model_set_ctx(&m,ctx);
+  char *text=NULL; size_t len=0,cap=0;
+  if(calib_file){
+    FILE *f=fopen(calib_file,"rb");
+    if(f){ char buf[16384]; size_t r; while((r=fread(buf,1,sizeof buf,f))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; } fclose(f); }
+    else fprintf(stderr,"pack: no abro %s — uso corpus embebido\n",calib_file);
+  }
+  if(!text || len==0){ text=(char*)DEFAULT_CALIB; len=strlen(DEFAULT_CALIB); }
+  i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
+  if(text!=(char*)DEFAULT_CALIB) free(text);
+  if(nt>ctx) nt=ctx;
+  if(nt<64){ fprintf(stderr,"pack: calibración insuficiente (%d tokens)\n",nt); free(ids); model_free(&m); remove(tmp); return 1; }
+  fprintf(stderr,"pack: calibrando con %d tokens...\n",nt);
+  int ok = (model_collect_stats(&m,ids,nt)==0 && m.ffn_stats!=NULL);
+  free(ids);
+  if(!ok){ model_free(&m); remove(tmp); return 1; }
+  int rc=g2bx_pack_prune_scores(argv[2],argv[3],downq4,prune,m.ffn_stats)?1:0;
+  model_free_stats(&m);
+  model_free(&m);
+  remove(tmp);
+  return rc;
 }
 
 static int cmd_info(int argc, char **argv){

@@ -139,15 +139,13 @@ static void kv_swap_free(Model *m){
 #endif
 
 static void free_rt(Model *m){
-#ifdef DBG_RT
-  fprintf(stderr,"free_rt: buf=%p pool=%p B=%d\n",(void*)m->buf,(void*)m->pf_pool,m->pf_B);
-#endif
   free(m->buf);
   m->buf=NULL;
   free(m->pf_pool);
   m->pf_pool=NULL;
   m->pf_x=m->pf_xb=m->pf_hb=m->pf_hb2=m->pf_q=m->pf_k=m->pf_v=m->pf_att=NULL;
   m->pf_B=0;
+  free(m->ffn_stats); m->ffn_stats=NULL;
   if(m->use_swap && m->swap_view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
@@ -708,6 +706,10 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
       matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
     }
     silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
+    if(m->collect_stats && m->ffn_stats){
+      f32 *st=m->ffn_stats+(size_t)L*hid;
+      for(i32 i=0;i<hid;i++) st[i]+=fabsf(hb[i]);
+    }
     matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
     for(i32 i=0;i<dim;i++) x[i]+=xb[i];
   }
@@ -865,6 +867,13 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
       matmul_q_b(hb ,xb,slot_ptr(m,wg),wg->type,dim,hid,B);
       matmul_q_b(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,B);
       for(i32 t=0;t<B;t++) silu_mul(hb+(size_t)t*hid,hb2+(size_t)t*hid,hid);
+      if(m->collect_stats && m->ffn_stats){
+        f32 *st=m->ffn_stats+(size_t)L*hid;
+        for(i32 t=0;t<B;t++){
+          const f32 *h=hb+(size_t)t*hid;
+          for(i32 i=0;i<hid;i++) st[i]+=fabsf(h[i]);
+        }
+      }
       matmul_q_b(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,B);
       for(i32 t=0;t<B;t++){
         f32 *xt=x+(size_t)t*dim, *xbt=xb+(size_t)t*dim;
@@ -884,6 +893,28 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
     pos0+=B; toks+=B; n-=B;
   }
   return 0;
+}
+
+/* ── Calibración para poda estructurada ── */
+int model_collect_stats(Model *m, const i32 *toks, i32 n){
+  if(!m || !toks || n<=0) return -1;
+  if(!m->ffn_stats)
+    m->ffn_stats=calloc((size_t)m->c.n_layers*(size_t)m->c.hidden_dim,sizeof(f32));
+  if(!m->ffn_stats) return -1;
+  m->collect_stats=1;
+  i32 pos=0;
+  while(pos<n){
+    i32 chunk=n-pos; if(chunk>8) chunk=8;
+    if(model_prefill(m,toks+pos,chunk,pos,NULL))
+      for(i32 j=0;j<chunk;j++)
+        model_forward_ex(m,toks[pos+j],pos+j,NULL,0);
+    pos+=chunk;
+  }
+  m->collect_stats=0;
+  return 0;
+}
+void model_free_stats(Model *m){
+  free(m->ffn_stats); m->ffn_stats=NULL; m->collect_stats=0;
 }
 
 static void pack_q4_0_const(u8 *dst, i32 n, f32 scale){

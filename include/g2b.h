@@ -76,6 +76,11 @@ typedef struct { u8 role; u16 layer; u8 type; u32 nbytes; u64 off; } Slot;
 
 int g2bx_pack(const char *gguf_path, const char *out_path);
 int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4);
+/* Poda estructurada FFN: elimina la fracción `prune` de bloques de neuronas.
+   Con calib (de model_collect_stats) usa importancia real; sin ella, proxy |g·u|. */
+int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, float prune);
+int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
+                           int downq4, float prune, const f32 *calib);
 int g2bx_info(const char *path);
 
 typedef struct SHash SHash;
@@ -101,6 +106,9 @@ typedef struct {
   u8  *kcq, *vcq;             /* KV cuantizado Q8_0 (cuando F_KV_Q8) */
   i32 ctx;                    /* contexto efectivo en runtime (<= c.seq_len) */
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
+  /* recolección de estadísticas FFN para poda calibrada */
+  u8 collect_stats;
+  f32 *ffn_stats;             /* [n_layers x hidden]: Σ|silu(g)·u| por neurona */
   /* buffers del prefill batcheado ([B][...]) */
   i32 pf_B;
   f32 *pf_pool; /* base única del pool (lo único que se libera) */
@@ -139,6 +147,9 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits);
 void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits);
 /* Prefill batcheado: procesa tos[0..n) desde posición pos0; logits solo del último. */
 int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits);
+/* Calibración para poda: acumula Σ|silu(g)·u| por neurona sobre tokens. */
+int model_collect_stats(Model *m, const i32 *toks, i32 n);
+void model_free_stats(Model *m);
 i32 model_sample(f32 *logits, i32 n, f32 temp);
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
