@@ -824,6 +824,9 @@ void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0,
   i32 d=r1-r0;
   if(type==T_Q4_0){ matmul_q4_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
   if(type==T_Q8_0){ matmul_q8_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  if(type==T_Q4_0S){ matmul_q4_0s(out+r0,x,w+(size_t)r0*st,n,d); return; }
+#endif
 }
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(!out || !x || !w || n<=0 || d<=0 || B<=0){

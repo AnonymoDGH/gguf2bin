@@ -17,12 +17,13 @@ Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 | Model | Weights (mmap) | Runtime RAM | tok/s |
 |---|---|---|---|
 | **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 507 MB | **27+** |
-| **LFM2.5-1.2B** Q4_0S | 569 MB | 598 MB | **15.0** |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 507 MB | **24–28** |
+| **LFM2.5-1.2B** Q4_0S | 569 MB | 598 MB | **16.1** |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** |
 
-At 27 tok/s the decode streams ~9 GB/s — essentially pinned to the DDR3L bus ceiling.
+At ~27 tok/s the decode streams ~9 GB/s — essentially pinned to the DDR3L bus ceiling.
 Batched prefill runs at the kernel compute ceiling (~27 GMAC/s).
+Prefill Qwen3-0.6B: 46.6 tok/s.
 
 ## 🚀 Quick start
 
@@ -72,9 +73,22 @@ gguf2bin2 vkinfo                              # sonda Vulkan
 ```
 
 Sampling: quickselect top-k O(n) + Gumbel-max + xorshift64\* reproducible con `--seed`.
-`--gpu` activa el **dual band CPU+GPU** del head GEMV (worker Vulkan aislado en proceso hijo;
-si el driver falla, cae a CPU sin interrumpir nada). Actualmente bloqueado por ICDs rotos
-en el equipo de prueba — ver `docs/`.
+
+### 🎮 Dual band CPU+GPU (`--gpu`)
+
+El head GEMV (vocab×dim, la capa más gorda) se reparte entre CPU y GPU con calibración automática:
+
+```
+[gpu] worker listo
+[gpu] dual band: cpu=[0..44855) gpu=[44855..65536)  tc=6.1ms tg=13.1ms
+```
+
+- **Worker Vulkan en proceso hijo** — si el driver crashea o cuelga, el runtime cae a CPU-only sin interrumpir nada.
+- **Bypass del loader Vulkan**: carga el ICD directamente desde DriverStore (útil en sistemas con el registro `Khronos\Vulkan\Drivers` roto).
+- **Split óptimo automático**: `gpu = vocab·tc/(tc+tg)` medido en el primer token; si la GPU es >4× más lenta que la CPU, se apaga sola.
+- Soporta heads **Q4_0** y **Q4_0S**. Salida bit-idéntica al camino CPU (greedy).
+
+> ⚠️ En hardware donde la iGPU comparte el bus de RAM con la CPU (HD 520 + DDR3L), no hay ganancia neta: la calibración lo detecta y desactiva sola. El beneficio real llega con una dGPU con VRAM propia.
 
 ## 📐 Quality
 
@@ -129,7 +143,7 @@ docs/RESEARCH.md   notas de investigación y roadmap de rendimiento
 
 #### v4.5
 - Kernel batched (prefill) con acumulación diferida: mismo trato que el kernel de decode. Prefill Qwen2.5-3B 4.3 → 7.8 tok/s (+81 %), bit-exacto (`tools/prefilltest`). Prepara el terreno para la verificación especulativa.
-- Dual band CPU+GPU del head GEMV: worker Vulkan en proceso hijo (crash-proof frente a drivers rotos), calibración automática del split y auto-apagado si la GPU es más lenta. *(v4.5-gpu)*
+- **Dual band CPU+GPU del head GEMV**: worker Vulkan en proceso hijo (crash-proof), bypass del loader roto cargando el ICD directo del DriverStore, calibración automática del split con auto-apagado si la GPU no aporta. Heads Q4_0/Q4_0S, salida bit-idéntica.
 
 #### v4.4
 - **--drop N (ShortGPT)**: mide Block Influence por bloque durante una calibración rápida y omite los N menos influyentes. En LFM2.5-1.2B no compensa (BI mínimo 0.106).

@@ -1,0 +1,31 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0) readonly buffer W { uint wu[]; };
+layout(set=0,binding=1) readonly buffer X { float xv[]; };
+layout(set=0,binding=2) buffer O { float outv[]; };
+/* Q4_0S: escala fp16 compartida por superbloque de 256 elems (33 u32/superblock).
+   PC: rows, nsb (=n/256), row0, pad (=nsb*33) */
+layout(push_constant) uniform PC { uint rows; uint nsb; uint row0; uint pad; } pc;
+void main(){
+  uint row = gl_GlobalInvocationID.x;
+  if(row >= pc.rows) return;
+  uint rowBase = (pc.row0 + row) * pc.pad;
+  float acc = 0.0;
+  for(uint sb=0u; sb<pc.nsb; sb++){
+    uint sbBase = rowBase + sb*33u;
+    float d = unpackHalf2x16(wu[sbBase]).x;
+    for(uint k=0u;k<32u;k++){
+      uint wd = wu[sbBase + 1u + k];
+      uint byteIdx = k*4u;
+      for(uint b2=0u;b2<4u;b2++,byteIdx++){
+        uint byt = (wd >> (b2*8u)) & 0xFFu;
+        float lo = float(byt & 0xFu) - 8.0;
+        float hi = float(byt >> 4u) - 8.0;
+        uint g = byteIdx >> 4u, j = byteIdx & 15u;
+        acc += d*lo*xv[sb*256u + g*32u + j];
+        acc += d*hi*xv[sb*256u + g*32u + 16u + j];
+      }
+    }
+  }
+  outv[pc.row0 + row]=acc;
+}

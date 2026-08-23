@@ -68,7 +68,28 @@ int vk_init(void){
 #ifdef _WIN32
   { FILE *L=fopen("vk.log","a"); fprintf(L,"A: entrada\n"); fclose(L); }
   if(!getenv("VK_G2B_ALLOW_AMD") && !getenv("VK_LOADER_DRIVERS_DISABLE")) _putenv("VK_LOADER_DRIVERS_DISABLE=*amd*");
-  g_dll=LoadLibraryA("vulkan-1.dll");
+  /* Bypass del loader: este sistema no tiene HKLM\Khronos\Vulkan\Drivers y la
+     enumeracion del loader crashea. Cargamos el ICD del DriverStore DIRECTAMENTE. */
+  g_dll=NULL;
+  {
+    const char *dlls[2]={"igvk64.dll","amdvlk64.dll"};   /* AMD solo si VK_G2B_ALLOW_AMD */
+    int npat=getenv("VK_G2B_ALLOW_AMD")?2:1;
+    WIN32_FIND_DATAA fd;
+    HANDLE h=FindFirstFileA("C:\\Windows\\System32\\DriverStore\\FileRepository\\*",&fd);
+    if(h!=INVALID_HANDLE_VALUE){
+      do{
+        if(!(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)) continue;
+        for(int di=0;di<npat&&!g_dll;di++){
+          char full[MAX_PATH];
+          snprintf(full,sizeof full,"C:\\Windows\\System32\\DriverStore\\FileRepository\\%s\\%s",fd.cFileName,dlls[di]);
+          g_dll=LoadLibraryA(full);
+          if(g_dll){ FILE *L=fopen("vk.log","a"); fprintf(L,"A2: icd directo %s\n",full); fclose(L); }
+        }
+      }while(!g_dll&&FindNextFileA(h,&fd));
+      FindClose(h);
+    }
+  }
+  if(!g_dll) g_dll=LoadLibraryA("vulkan-1.dll");
 #else
   g_dll=dlopen("libvulkan.so.1",RTLD_NOW);
 #endif
@@ -87,11 +108,24 @@ int vk_init(void){
   if(!p_vkCreateInstance){ fprintf(stderr,"vk: sin vkCreateInstance\n"); return -1; }
   VkApplicationInfo ai; memset(&ai,0,sizeof ai);
   ai.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  ai.pApplicationName="gguf2bin2"; ai.apiVersion=VK_MAKE_API_VERSION(0,1,1,0);
+  ai.pApplicationName="gguf2bin2";
+  /* 1.0 directo y UNA sola llamada: este driver viejo crashea si se llama
+     dos veces tras un fallo (probado con reintento 1.1→1.0) */
+  ai.apiVersion=VK_MAKE_API_VERSION(0,1,0,0);
   { FILE *L=fopen("vk.log","a"); fprintf(L,"D: creando instancia api=%x\n",ai.apiVersion); fclose(L); }
   VkInstanceCreateInfo ci; memset(&ci,0,sizeof ci);
   ci.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; ci.pApplicationInfo=&ai;
-  if(p_vkCreateInstance(&ci,VK_NULL_HANDLE,&g_inst)!=VK_SUCCESS){ fprintf(stderr,"vk: fallo instancia\n"); return -1; }
+  VkResult vir=p_vkCreateInstance(&ci,VK_NULL_HANDLE,&g_inst);
+  if(vir!=VK_SUCCESS){
+    fprintf(stderr,"vk: fallo instancia (VkResult %d)\n",(int)vir);
+    { FILE *L=fopen("vk.log","a"); fprintf(L,"D3: fallo instancia VkResult %d\n",(int)vir); fclose(L); }
+    return -1;
+  }
+  /* ICD crudo: las funciones de instancia SOLO se resuelven con la
+     instancia ya creada (gpa(NULL,...) devuelve NULL para ellas) */
+  GETF(vkEnumeratePhysicalDevices); GETF(vkGetPhysicalDeviceProperties);
+  GETF(vkGetPhysicalDeviceMemoryProperties); GETF(vkCreateDevice);
+  GETF(vkDestroyInstance);
   u32 n=0;
   if(p_vkEnumeratePhysicalDevices(g_inst,&n,VK_NULL_HANDLE)||!n){ fprintf(stderr,"vk: 0 GPUs\n"); return -1; }
   VkPhysicalDevice *pds=malloc(n*sizeof(void*));
@@ -125,7 +159,10 @@ int vk_init(void){
     VkDeviceQueueCreateInfo qc={VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,VK_NULL_HANDLE,0,g_qfam,1,&pr2};
     VkDeviceCreateInfo dc={VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,VK_NULL_HANDLE,0,1,&qc,0,VK_NULL_HANDLE,0,VK_NULL_HANDLE};
     if(p_vkCreateDevice(g_pd,&dc,VK_NULL_HANDLE,&g_dev)){ fprintf(stderr,"vk: fallo dispositivo\n"); free(pds); return -1; }
-    p_vkGetDeviceQueue(g_dev,g_qfam,0,&g_queue);
+    { PFN_vkGetDeviceProcAddr gdpa=(PFN_vkGetDeviceProcAddr)p_vkGetInstanceProcAddr(g_inst,"vkGetDeviceProcAddr");
+      if(!gdpa){ fprintf(stderr,"vk: sin vkGetDeviceProcAddr\n"); free(pds); return -1; }
+      PFN_vkGetDeviceQueue gdq=(PFN_vkGetDeviceQueue)gdpa(g_dev,"vkGetDeviceQueue");
+      if(gdq) gdq(g_dev,g_qfam,0,&g_queue); }
     fprintf(stderr,"[vk] dispositivo listo: %s\n",g_name);
   }
   p_GetDeviceProcAddr=(PFN_vkGetDeviceProcAddr)p_vkGetInstanceProcAddr((VkInstance)g_inst,"vkGetDeviceProcAddr");
@@ -189,6 +226,7 @@ int vk_head_upload(const u8 *weights, i32 n, i32 rows){
   g_rows=(u32)rows; g_rows_total=(u32)rows; g_nsb=(u32)(n/256); g_n_head=n; g_row_u32s=33;
   size_t wbytes=(size_t)rows*g_nsb*33*4, xb=(size_t)n*4, ob=(size_t)rows*4;
   g_wbytes=wbytes;
+  GETD(vkCreateBuffer);
   VkBufferCreateInfo wb={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,VK_NULL_HANDLE,0,(VkDeviceSize)wbytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VK_SHARING_MODE_EXCLUSIVE};
   VkBufferCreateInfo sb2=wb; sb2.size=(VkDeviceSize)xb;
   VkBufferCreateInfo ob2=wb; ob2.size=(VkDeviceSize)ob;
@@ -233,6 +271,7 @@ int vk_head_upload_q40(const u8 *weights, i32 n, i32 rows){
   g_rows=(u32)rows; g_rows_total=(u32)rows; g_nsb=(u32)(n/32); g_n_head=n; g_row_u32s=17;
   size_t wbytes=(size_t)rows*g_nsb*17*4, xb=(size_t)n*4, ob=(size_t)rows*4;
   g_wbytes=wbytes;
+  GETD(vkCreateBuffer);
   VkBufferCreateInfo wb={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,VK_NULL_HANDLE,0,(VkDeviceSize)wbytes,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VK_SHARING_MODE_EXCLUSIVE};
   VkBufferCreateInfo sb2=wb; sb2.size=(VkDeviceSize)xb;
   VkBufferCreateInfo ob2=wb; ob2.size=(VkDeviceSize)ob;
@@ -369,19 +408,27 @@ static u32 g_wr0=0, g_wr=0;      /* rango GPU actual (hijo y padre) */
 
 /* ── lado hijo ── */
 int vk_worker_main(int argc,char **argv){
-  if(argc<7) return 2;
+  if(argc<8) return 2;
   const char *model=argv[2];
   u64 off=strtoull(argv[3],0,10), len=strtoull(argv[4],0,10);
   i32 n=atoi(argv[5]), rows=atoi(argv[6]);
+  u32 wtype=(u32)atoi(argv[7]);
   if(vk_init()) return 3;                     /* puede colgar/crashear: padre lo tolera */
   FILE *f=fopen(model,"rb");
   if(!f||fseek(f,(long)off,SEEK_SET)){ if(f)fclose(f); return 4; }
   u8 *w=malloc((size_t)len);
   if(!w||fread(w,1,(size_t)len,f)!=(size_t)len){ fclose(f); free(w); return 5; }
   fclose(f);
-  if(vk_head_upload_q40(w,n,rows)) { free(w); return 6; }
+  int rc;
+  if(wtype==T_Q4_0S){
+    rc=vk_head_upload(w,n,rows);                        /* layout Q4_0S: 33 u32/sb */
+    if(!rc) rc=head_pipeline_spv("shaders/q40s_gemv.spv");
+  } else {
+    rc=vk_head_upload_q40(w,n,rows);                    /* layout Q4_0: 17 u32/bloque */
+    if(!rc) rc=head_pipeline_spv("shaders/q40_gemv.spv");
+  }
   free(w);
-  if(head_pipeline_spv("shaders/q40_gemv.spv")) return 7;
+  if(rc) return 6;
   _setmode(_fileno(stdin),_O_BINARY); _setmode(_fileno(stdout),_O_BINARY);
   fputs("VKOK\n",stdout); fflush(stdout);
   i32 done=0;
@@ -408,12 +455,29 @@ int vk_worker_main(int argc,char **argv){
 static HANDLE g_proc=NULL, g_inW=NULL, g_outR=NULL;
 static int g_state=-1;            /* -1 sin probar, 0 apagado, 1 activo */
 static int g_cal=0;
+static u32 g_dtype=99;
 static i32 g_vn=0, g_vocab=0;
 static f32 *g_scr=NULL;
 static LARGE_INTEGER g_qpf;
 
-static int wread(void *b,u32 sz){ DWORD got=0; return ReadFile(g_outR,b,sz,&got,NULL)&&got==sz; }
-static int wwrite(const void *b,u32 sz){ DWORD put=0; return WriteFile(g_inW,b,sz,&put,NULL)&&put==sz; }
+static int wread(void *b,u32 sz){
+  u8 *p=(u8*)b; DWORD got=0;
+  while(got<sz){
+    DWORD r=0;
+    if(!ReadFile(g_outR,p+got,sz-got,&r,NULL)||r==0) return 0;
+    got+=r;
+  }
+  return 1;
+}
+static int wwrite(const void *b,u32 sz){
+  const u8 *p=(const u8*)b; DWORD put=0;
+  while(put<sz){
+    DWORD w=0;
+    if(!WriteFile(g_inW,p+put,sz-put,&w,NULL)||w==0) return 0;
+    put+=w;
+  }
+  return 1;
+}
 static double now_s(void){ LARGE_INTEGER t; QueryPerformanceCounter(&t); return (double)(t.QuadPart)/(double)g_qpf.QuadPart; }
 static int has_vkok(const char *b,u32 n){
   if(n<4) return 0;
@@ -434,16 +498,18 @@ int vk_dual_start(Model *m,const char *model_path){
   if(g_state!=-1) return g_state==1;
   QueryPerformanceFrequency(&g_qpf);
   Slot *o=slot_get(m,R_OUTPUT,-1); if(!o) o=slot_get(m,R_TOK_EMBD,-1);
-  if(!o||o->type!=T_Q4_0){ fprintf(stderr,"[gpu] head no es Q4_0 — dual band no disponible\n"); g_state=0; return 0; }
+  if(!o||(o->type!=T_Q4_0&&o->type!=T_Q4_0S)){ fprintf(stderr,"[gpu] head no es Q4_0/Q4_0S — dual band no disponible\n"); g_state=0; return 0; }
+  g_dtype=o->type;
   char exe[MAX_PATH]; GetModuleFileNameA(NULL,exe,MAX_PATH);
   char cmd[2400];
-  snprintf(cmd,sizeof cmd,"\"%s\" --gpu-worker \"%s\" %llu %llu %d %d",
+  snprintf(cmd,sizeof cmd,"\"%s\" --gpu-worker \"%s\" %llu %llu %d %d %d",
     exe,model_path,(unsigned long long)o->off,(unsigned long long)o->nbytes,
-    (int)m->c.dim,(int)m->c.vocab);
+    (int)m->c.dim,(int)m->c.vocab,(int)g_dtype);
   SECURITY_ATTRIBUTES sa={sizeof sa,NULL,TRUE};
   HANDLE inR=NULL, outR=NULL, outW=NULL;
   CreatePipe(&outR,&outW,&sa,1<<20);       /* hijo→padre: logits/handshake */
   CreatePipe(&inR,&g_inW,&sa,1<<20);       /* padre→hijo: comandos/x */
+  g_outR=outR;
   SetHandleInformation(g_inW,HANDLE_FLAG_INHERIT,0);
   SetHandleInformation(g_outR,HANDLE_FLAG_INHERIT,0);
   STARTUPINFOA si; memset(&si,0,sizeof si); si.cb=sizeof si;
@@ -456,13 +522,20 @@ int vk_dual_start(Model *m,const char *model_path){
   g_proc=pi.hProcess; CloseHandle(pi.hThread);
   /* handshake con timeout: el driver puede colgar en vez de crashear */
   char line[64]; u32 got=0; DWORD t0=GetTickCount();
+  { FILE *L=fopen("vk.log","a"); fprintf(L,"P: worker lanzado, esperando VKOK\n"); fclose(L); }
   while(got<sizeof line){
     DWORD avail=0;
-    if(!PeekNamedPipe(g_outR,NULL,0,NULL,&avail,NULL)) break;      /* tuberia muerta = crash */
-    if(avail>0){ DWORD r=0; ReadFile(g_outR,line+got,sizeof line-got,&r,NULL); got+=r; if(has_vkok(line,got)) break; }
+    if(!PeekNamedPipe(g_outR,NULL,0,NULL,&avail,NULL)){
+      DWORD xc=0,le=GetLastError(); GetExitCodeProcess(pi.hProcess,&xc);
+      FILE *L=fopen("vk.log","a"); fprintf(L,"P: peek fallo err=%u hijo exit=%u\n",(unsigned)le,(unsigned)xc); fclose(L);
+      break;
+    }
+    if(avail>0){ DWORD r=0; ReadFile(g_outR,line+got,sizeof line-got,&r,NULL); got+=r;
+      FILE *L=fopen("vk.log","a"); fprintf(L,"P: lei %u bytes\n",(unsigned)r); fclose(L);
+      if(has_vkok(line,got)) break; }
     else{
-      if(WaitForSingleObject(pi.hProcess,50)==WAIT_OBJECT_0) break;  /* murio */
-      if(GetTickCount()-t0>15000) break;                             /* colgado */
+      if(WaitForSingleObject(pi.hProcess,50)==WAIT_OBJECT_0){ FILE *L=fopen("vk.log","a"); fprintf(L,"P: hijo murio\n"); fclose(L); break; }
+      if(GetTickCount()-t0>15000){ FILE *L=fopen("vk.log","a"); fprintf(L,"P: timeout 15s\n"); fclose(L); break; }
     }
   }
   if(!has_vkok(line,got)){
@@ -477,7 +550,7 @@ int vk_dual_start(Model *m,const char *model_path){
 
 int vk_head_dual(f32 *logits,const f32 *x,const u8 *w,u32 type,i32 n,i32 vocab){
   if(g_state!=1) return 0;
-  if(type!=T_Q4_0||n!=g_vn||vocab!=g_vocab){ vk_dual_stop(); return 0; }
+  if((type!=T_Q4_0&&type!=T_Q4_0S)||type!=g_dtype||n!=g_vn||vocab!=g_vocab){ vk_dual_stop(); return 0; }
   if(!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
   /* calibracion una vez: tiempo CPU completo vs GPU completo → split óptimo */
   if(!g_cal){

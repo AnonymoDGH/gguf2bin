@@ -724,6 +724,8 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
   if(dbg&&pos<4){ f32 s=0,mx=-1e30f,mn=1e30f; for(i32 i=0;i<dim;i++){ s+=x[i]*x[i]; if(x[i]>mx)mx=x[i]; if(x[i]<mn)mn=x[i]; }
     fprintf(stderr,"[dbg] final |x|=%g max=%g min=%g\n",sqrtf(s),mx,mn); }
   if(!want_logits || !logits) return;
+  /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
+  if(vk_head_dual(logits,x,slot_ptr(m,emb),emb->type,dim,c->vocab)) return;
   matmul_q(logits,x,slot_ptr(m,emb),emb->type,dim,c->vocab,row); /* head atado */
   if(dbg&&pos<4){ f32 mx=-1e30f,mn=1e30f; i32 b1=0,b2=0,b3=0;
     for(i32 i=0;i<c->vocab;i++){ if(logits[i]>mx){mx=logits[i];b3=b2;b2=b1;b1=i;} if(logits[i]<mn)mn=logits[i]; }
