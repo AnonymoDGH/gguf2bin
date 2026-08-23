@@ -27,7 +27,10 @@ static FILE *vlog(void){ return fopen("vk.log","a"); }
 int vk_init(void){
 #ifdef _WIN32
   fprintf(stderr,"[vk] cargando vulkan-1.dll...\n");
-  { FILE *L=vlog(); fprintf(L,"1: cargando dll\n"); fclose(L); }
+  /* El ICD de AMD (amdvlk64.dll, driver 27.20/2022) cuelga vkCreateInstance
+     en este sistema hibrido: se excluye por defecto. Override con
+     VK_G2B_ALLOW_AMD=1 tras actualizar el driver. */
+  if(!getenv("VK_G2B_ALLOW_AMD")) SetEnvironmentVariableA("VK_LOADER_DRIVERS_DISABLE","*amd*");
   g_dll=LoadLibraryA("vulkan-1.dll");
 #else
   g_dll=dlopen("libvulkan.so.1",RTLD_NOW);
