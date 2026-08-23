@@ -1,5 +1,7 @@
 # gguf2bin2
 
+**English** | [Español](README.es.md)
+
 **C99 LLM runtime for low-RAM machines** — GGUF → G2BX (own format) → inference.
 Weights are memory-mapped: your real RAM budget is **KV cache + activations + tokenizer**, not the model file.
 
@@ -48,7 +50,7 @@ make test       # smoke test on a synthetic model
 | `--swap [PATH]` | KV cache backed on disk → **37 MB heap** even for big models |
 
 ```bash
-$ gguf2bin2 run qwen.g2bx "Hello" --max-ram 2048   # ideal para máquinas de 2 GB
+$ gguf2bin2 run qwen.g2bx "Hello" --max-ram 2048   # ideal for 2 GB machines
 ```
 
 ### What counts against a 2 GB budget?
@@ -64,40 +66,40 @@ $ gguf2bin2 run qwen.g2bx "Hello" --max-ram 2048   # ideal para máquinas de 2 G
 
 ```bash
 gguf2bin2 pack model.gguf out.g2bx [--q4]     # GGUF → G2BX (--q4: half the bytes)
-gguf2bin2 info model.g2bx                     # slots, geometría, tipos
+gguf2bin2 info model.g2bx                     # slots, geometry, types
 gguf2bin2 run m.g2bx "prompt" [-n N] [-t T] [--bos] [--gpu]
 gguf2bin2 chat m.g2bx [--no-think] [--fast] [--swap]
 gguf2bin2 bench m.g2bx [-n 32] [--prefill 256]
-gguf2bin2 ppl m.g2bx -f texto.txt             # harness de calidad (perplexity)
-gguf2bin2 vkinfo                              # sonda Vulkan
+gguf2bin2 ppl m.g2bx -f text.txt              # quality harness (perplexity)
+gguf2bin2 vkinfo                              # Vulkan probe
 ```
 
-Sampling: quickselect top-k O(n) + Gumbel-max + xorshift64\* reproducible con `--seed`.
+Sampling: quickselect top-k O(n) + Gumbel-max + xorshift64\* reproducible via `--seed`.
 
 ### 🎮 Dual band CPU+GPU (`--gpu`)
 
-El head GEMV (vocab×dim, la capa más gorda) se reparte entre CPU y GPU con calibración automática:
+The head GEMV (vocab×dim, the heaviest layer) gets split between CPU and GPU with automatic calibration:
 
 ```
-[gpu] worker listo
+[gpu] worker ready
 [gpu] dual band: cpu=[0..44855) gpu=[44855..65536)  tc=6.1ms tg=13.1ms
 ```
 
-- **Worker Vulkan en proceso hijo** — si el driver crashea o cuelga, el runtime cae a CPU-only sin interrumpir nada.
-- **Bypass del loader Vulkan**: carga el ICD directamente desde DriverStore (útil en sistemas con el registro `Khronos\Vulkan\Drivers` roto).
-- **Split óptimo automático**: `gpu = vocab·tc/(tc+tg)` medido en el primer token; si la GPU es >4× más lenta que la CPU, se apaga sola.
-- Soporta heads **Q4_0** y **Q4_0S**. Salida bit-idéntica al camino CPU (greedy).
+- **Vulkan worker in a child process** — if the driver crashes or hangs, the runtime falls back to CPU-only without interrupting generation.
+- **Vulkan loader bypass**: loads the ICD directly from DriverStore (useful on systems with a broken `Khronos\Vulkan\Drivers` registry).
+- **Automatic optimal split**: `gpu = vocab·tc/(tc+tg)` measured on the first token; if the GPU is >4× slower than the CPU it shuts itself off.
+- Supports **Q4_0** and **Q4_0S** heads. Bit-identical output vs the CPU path (greedy).
 
-> ⚠️ En hardware donde la iGPU comparte el bus de RAM con la CPU (HD 520 + DDR3L), no hay ganancia neta: la calibración lo detecta y desactiva sola. El beneficio real llega con una dGPU con VRAM propia.
+> ⚠️ On hardware where the iGPU shares the RAM bus with the CPU (HD 520 + DDR3L) there is no net gain — calibration detects it and disables itself. The real payoff comes with a dGPU with dedicated VRAM.
 
 ## 📐 Quality
 
-Perplexity (corpus interno, SmolLM2-135M-Instruct): uniforme-Q4_0 = 73.7 *(roto)*,
-Q4_K_M nativo = **48.7**, Q6_K = 48.0, Q8_0 = 48.0. Los K-quants nativos conservan
-la calidad del Q8_0 dentro del 1.4 % y corren más rápido que el uniforme-Q4_0.
+Perplexity (internal corpus, SmolLM2-135M-Instruct): uniform Q4_0 = 73.7 *(broken)*,
+native Q4_K_M = **48.7**, Q6_K = 48.0, Q8_0 = 48.0. Native K-quants keep Q8_0-level
+quality within 1.4 % while running faster than uniform Q4_0.
 
-Validación numérica incluida: `make kvtest` (KV F32 vs Q8), `tools/prefilltest`
-(prefill batcheado bit-exacto), `tools/qkcheck` (46/46 kernels K-quant).
+Included numerical validation: `make kvtest` (F32 vs Q8 KV), `tools/prefilltest`
+(bit-exact batched prefill), `tools/qkcheck` (46/46 K-quant kernels).
 
 <details>
 <summary><b>📦 G2BX format & supported types</b></summary>
@@ -122,18 +124,18 @@ Slot: role:u8 layer:u16 type:u8 nbytes:u32 off:u64
 <summary><b>🗂 Project layout</b></summary>
 
 ```
-include/g2b.h      API común
-src/l1_gguf.c      parser GGUF (mmap)
-src/l2_codec.c     dequant + matmul fusionados (AVX2)
+include/g2b.h      common API
+src/l1_gguf.c      GGUF parser (mmap)
+src/l2_codec.c     fused dequant + matmul (AVX2)
 src/l3_math.c      rmsnorm, rope, silu, softmax AVX2
-src/l4_gbin.c      packer G2BX (read_cfg genérico por arquitectura)
-src/l5_model.c     load + forward + KV Q8 + budget RAM + atención GQA-major
-src/l6_token.c     tokenizer BPE
-src/main.c         CLI (sampling quickselect/Gumbel, chat con compactación de contexto)
-src/l7_vulkan.c    backend GPU dual band (worker en proceso hijo, crash-proof)
+src/l4_gbin.c      G2BX packer (generic per-architecture read_cfg)
+src/l5_model.c     load + forward + Q8 KV + RAM budget + GQA-major attention
+src/l6_token.c     BPE tokenizer
+src/main.c         CLI (quickselect/Gumbel sampling, chat with context compaction)
+src/l7_vulkan.c    dual band GPU backend (child-process worker, crash-proof)
 shaders/           compute shaders (Q4_0/Q4_0S GEMV)
 tools/             kvtest · prefilltest · exptest · qkcheck · mmbench · dump_gguf.py
-docs/RESEARCH.md   notas de investigación y roadmap de rendimiento
+docs/RESEARCH.md   research notes and performance roadmap
 ```
 
 </details>
@@ -142,35 +144,35 @@ docs/RESEARCH.md   notas de investigación y roadmap de rendimiento
 <summary><b>📜 Changelog</b></summary>
 
 #### v4.5
-- Kernel batched (prefill) con acumulación diferida: mismo trato que el kernel de decode. Prefill Qwen2.5-3B 4.3 → 7.8 tok/s (+81 %), bit-exacto (`tools/prefilltest`). Prepara el terreno para la verificación especulativa.
-- **Dual band CPU+GPU del head GEMV**: worker Vulkan en proceso hijo (crash-proof), bypass del loader roto cargando el ICD directo del DriverStore, calibración automática del split con auto-apagado si la GPU no aporta. Heads Q4_0/Q4_0S, salida bit-idéntica.
+- Batched (prefill) kernel with deferred accumulation: same treatment as the decode kernel. Qwen2.5-3B prefill 4.3 → 7.8 tok/s (+81 %), bit-exact (`tools/prefilltest`). Sets the stage for speculative verification.
+- **Dual band CPU+GPU head GEMV**: Vulkan worker in a child process (crash-proof), loader bypass loading the ICD straight from DriverStore, automatic split calibration with self-shutdown when the GPU doesn't help. Heads Q4_0/Q4_0S, bit-identical output.
 
 #### v4.4
-- **--drop N (ShortGPT)**: mide Block Influence por bloque durante una calibración rápida y omite los N menos influyentes. En LFM2.5-1.2B no compensa (BI mínimo 0.106).
+- **--drop N (ShortGPT)**: measures per-block Block Influence during a quick calibration and skips the N least influential blocks. On LFM2.5-1.2B it doesn't pay off (min BI 0.106).
 
 #### v4.3
-- Kernel Q4_0 de decode con acumulación diferida: un hsum por fila en vez de uno por bloque. Qwen2.5-3B 3.1 → 4.3 tok/s (2.9× vs v3.5); Qwen3-0.6B +10 %.
-- Q5_0 end-to-end (kernel AVX2 fusionado con LUT de bits altos).
-- Tabla de calidad medida (comando `ppl`).
+- Decode Q4_0 kernel with deferred accumulation: one hsum per row instead of one per block. Qwen2.5-3B 3.1 → 4.3 tok/s (2.9× vs v3.5); Qwen3-0.6B +10 %.
+- Q5_0 end-to-end (fused AVX2 kernel with high-bits LUT).
+- Measured quality table (`ppl` command).
 
 #### v4.2
-- Kernels AVX2 fusionados para Q4_K y Q6_K (`maddubs` + corrección m·Σx). Antes cualquier pack K-quant caía al fallback 2–5× más lento. Validado byte a byte con `tools/qkcheck`.
-- Comando `ppl`; bench min-of-3 (el thermal throttling miente).
+- Fused AVX2 kernels for Q4_K and Q6_K (`maddubs` + m·Σx correction term). Before, any K-quant pack fell to the 2–5× slower fallback. Validated byte-by-byte with `tools/qkcheck`.
+- `ppl` command; min-of-3 bench (thermal throttling lies).
 
 #### v4.1
-- K-quants arreglados contra ggml oficial (`deq_q3_K/q4_K/q5_K` rotos desde v3.4: mitad del tensor sin escribir + interleave incorrecto).
-- Prefill batcheado (B=8) bit-exacto; validación de geometría en carga; scratch persistente de activación Q8 (−210 malloc/free por token).
+- K-quants fixed against official ggml (`deq_q3_K/q4_K/q5_K` broken since v3.4: half the tensor unwritten + wrong scale interleave).
+- Batched prefill (B=8) bit-exact; geometry validation at load; persistent Q8 activation scratch (−210 malloc/free per token).
 
 #### v4.0
-- Prefill sin logits (solo el último token calcula vocab×dim): prefill 1.32×.
-- Atención GQA-major: cada fila K/V se dequantiza una vez por grupo de heads.
-- softmax/silu AVX2 con exp rápida (err rel < 2e-7); fix rmsnorm cola no múltiplo de 32.
-- Sampling nuevo: quickselect top-k O(n), Gumbel-max, xorshift64\*, `--seed`.
-- GGUF por mmap; compactación de contexto en chat largo.
+- Prefill without logits (only the last token computes vocab×dim): prefill 1.32×.
+- GQA-major attention: each K/V row dequantized once per head group.
+- softmax/silu AVX2 with fast exp (rel err < 2e-7); rmsnorm fix for non-multiple-of-32 tails.
+- New sampling: O(n) quickselect top-k, Gumbel-max, xorshift64\*, reproducible `--seed`.
+- GGUF via mmap; long-chat context compaction.
 
 #### v3.x
-- Q4_0 AVX2 (2 bloques/iter, ILP), atención AVX2, dequant K-quant completo.
-- KV Q8_0 (`--q8-kv`), contexto efectivo, presupuesto RAM (`--max-ram`), swap en disco.
-- Fix RoPE LLaMA (paso −2.0/head_dim) y NEOX vs LLaMA: la raíz histórica del output corrupto.
+- Q4_0 AVX2 (2 blocks/iter, ILP), AVX2 attention, full K-quant dequant.
+- Q8_0 KV cache (`--q8-kv`), effective context, RAM budget (`--max-ram`), disk swap.
+- LLaMA RoPE fix (−2.0/head_dim step) and NEOX vs LLaMA: the historical root of corrupt output.
 
 </details>
