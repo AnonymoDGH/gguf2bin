@@ -125,6 +125,36 @@ static void quant_block_q4_0(const f32 *x, u8 *dst){
   f32 amax=0; for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax) amax=a; } f32 d=amax/7.0f; if(d<=0) d=1e-9f; u16 sd=f32_to_half(d); memcpy(dst,&sd,2);
   for(int j=0;j<16;j++){ int q0=(int)lroundf(x[j]/d)+8; int q1=(int)lroundf(x[j+16]/d)+8; if(q0<0)q0=0; else if(q0>15)q0=15; if(q1<0)q1=0; else if(q1>15)q1=15; dst[2+j]=(u8)(q0|(q1<<4)); }
 }
+/* Q4_0S: escala fp16 UNICA por superbloque de 256 elems (130B vs 144B) */
+static u8 *convert_tensor_q4_0s(const u8 *src, u32 srctype, u64 ne){
+  if(ne%256) return NULL;
+  u64 nsb=ne/256;
+  u8 *out=malloc((size_t)(nsb*130));
+  if(!out) return NULL;
+  f32 blk[256];
+  for(u64 sb=0;sb<nsb;sb++){
+    /* dequantizar el superbloque segun el tipo fuente */
+    u64 bs=ggml_block_size(srctype);
+    f32 amax=0;
+    for(u64 j=0;j<256;j+=bs){
+      gguf_dequant(srctype,(u8*)(src+ (size_t)((sb*256+j)/bs)*ggml_type_bytes(srctype)),blk+(j==0?0:j),bs);
+    }
+    /* re-dequant correcto: blk[] ya lleno por trozos arriba solo si bs<=256 */
+    for(int i=0;i<256;i++){ f32 a=fabsf(blk[i]); if(a>amax) amax=a; }
+    f32 d=amax/7.0f; if(d<=0) d=1e-9f;
+    u16 sd=f32_to_half(d); memcpy(out+sb*130,&sd,2);
+    for(int g=0;g<8;g++){
+      u8 *dst=out+sb*130+2+g*16;
+      const f32 *xg=blk+g*32;
+      for(int j=0;j<16;j++){
+        int q0=(int)lroundf(xg[j]/d)+8; int q1=(int)lroundf(xg[j+16]/d)+8;
+        if(q0<0)q0=0; else if(q0>15)q0=15; if(q1<0)q1=0; else if(q1>15)q1=15;
+        dst[j]=(u8)(q0|(q1<<4));
+      }
+    }
+  }
+  return out;
+}
 static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   if(ne%32) return NULL;
   u64 nb=ne/32; u8 *out=malloc(nb*18); if(!out) return NULL;
@@ -145,6 +175,8 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   }
   return out;
 }
+static int g_force_q4s=0;
+void g2bx_set_q4s(int v){ g_force_q4s=v; }
 int g2bx_pack(const char *gguf_path, const char *out_path){
   return g2bx_pack_prune(gguf_path, out_path, 0, 0.f);
 }
@@ -327,7 +359,11 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       if(slots[i].type==T_F32 || slots[i].type==T_F16) conv = 1;
       else if(downq4 && slots[i].type!=T_Q4_0) conv = 1;
     }
-    if(conv){
+    if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && ne_arr[i]%256==0){
+      u8 *qs=convert_tensor_q4_0s(src_ptr[i], slots[i].type, ne_arr[i]);
+      if(qs){ conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S; slots[i].nbytes=(u32)(ne_arr[i]/256*130); src_sz[i]=slots[i].nbytes; }
+    }
+    if(conv && slots[i].type!=T_Q4_0S){
       u8 *q4=convert_tensor_q4_0(src_ptr[i], slots[i].type, ne_arr[i]);
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }

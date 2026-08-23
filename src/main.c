@@ -132,6 +132,7 @@ static int cmd_pack(int argc, char **argv){
   int downq4=0; float prune=0.f; const char *calib_file=NULL;
   for(int i=4;i<argc;i++){
     if(!strcmp(argv[i],"--q4")) downq4=1;
+    else if(!strcmp(argv[i],"--q4s")){ downq4=1; g2bx_set_q4s(1); }
     else if(!strcmp(argv[i],"--prune")&&i+1<argc) prune=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--calib")&&i+1<argc) calib_file=argv[++i];
   }
