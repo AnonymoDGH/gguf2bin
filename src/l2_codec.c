@@ -6,6 +6,8 @@
 #if defined(__F16C__)
 #include <immintrin.h>
 #endif
+void matmul_q4_0s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
 /* Threshold: skip OpenMP for small matmuls where fork/join overhead dominates. */
 #define OMP_MM_MIN 131072 /* ~512*256 elements — below this, single-thread wins */
 u64 ggml_block_size(u32 type){
@@ -559,6 +561,38 @@ void matmul_q4_0s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
     Q4_ROW_HSUM(acc,out+i);
   }
 }
+/* batched: cada fila de pesos se streamea UNA vez para los B tokens */
+void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
+  if(B<=0) return;
+  if(B==1){ matmul_q4_0s(out,x,w,n,d); return; }
+  i32 nb=n/32, nsb=n/256;
+  const __m128i mask0F=_mm_set1_epi8(0x0F);
+  const __m256i ones8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
+  if(!q4_scratch(n*B)){ memset(out,0,(size_t)n*B*d*sizeof(f32)); return; }
+  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
+  for(i32 t=0;t<B;t++)
+    q4_quant_act(x+(size_t)t*n,n,q8+(size_t)t*n,q8d+(size_t)t*(n/32),NULL);
+  #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    const u8 *row=w+(size_t)i*(size_t)nsb*130;
+    for(i32 t=0;t<B;t++){
+      const u8 *qa=q8+(size_t)t*n;
+      __m256 acc=_mm256_setzero_ps();
+      for(i32 b=0;b<nb;b+=8){
+        f32 ws=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*130));
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*0,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),      ws*q8d[(size_t)t*nb+b]  ,acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*1,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+1)*32)),ws*q8d[(size_t)t*nb+b+1],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*2,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+2)*32)),ws*q8d[(size_t)t*nb+b+2],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*3,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+3)*32)),ws*q8d[(size_t)t*nb+b+3],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*4,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+4)*32)),ws*q8d[(size_t)t*nb+b+4],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*5,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+5)*32)),ws*q8d[(size_t)t*nb+b+5],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*6,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+6)*32)),ws*q8d[(size_t)t*nb+b+6],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*130+16*7,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+7)*32)),ws*q8d[(size_t)t*nb+b+7],acc);
+      }
+      Q4_ROW_HSUM(acc,out+(size_t)t*d+i);
+    }
+  }
+}
 /* K-quant fused dots (sin dequantizar la fila) ── */
 /* dos mitades de 16 bytes → 32 nibbles contiguos dot contra 32 bytes s8 */
 static inline i32 nib_dot2(const __m128i pa, const __m128i pb, const u8 *act){
@@ -789,7 +823,9 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
     return;
   }
   if(type==T_Q4_0){ matmul_q4_0_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_0S){ for(i32 t=0;t<B;t++) matmul_q4_0s(out+(size_t)t*d,x+(size_t)t*n,w,n,d); return; }
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  if(type==T_Q4_0S){ matmul_q4_0s_b(out,x,w,n,d,B); return; }
+#endif
   if(type==T_Q8_0){ matmul_q8_0_b(out,x,w,n,d,B); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,B); return; }
@@ -837,7 +873,10 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
     return;
   }
   if(type==T_Q4_0){ matmul_q4_0(out,x,w,n,d); return; }
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q4_0S){ matmul_q4_0s(out,x,w,n,d); return; }
+#endif
+
   if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,1); return; }
