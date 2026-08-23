@@ -86,6 +86,8 @@ int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, flo
 int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
                            int downq4, float prune, const f32 *calib);
 void g2bx_set_q4s(int v);
+int vk_init(void); void vkinfo_cmd(void); int vk_device_ok(void);
+int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(void); void vk_head_run(const f32 *x, f32 *logits); int vk_head_ready(void);
 int g2bx_info(const char *path);
 
 typedef struct SHash SHash;
