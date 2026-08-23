@@ -117,7 +117,9 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
 }
 static u64 ne_of(const GTensor *t){ u64 n=1; for(u32 i=0;i<t->n_dims;i++) n*=t->dims[i]; return n; }
 static int is_weight_role(u8 role){
-  switch(role){ case R_TOK_EMBD: case R_OUTPUT: case R_ATTN_Q: case R_ATTN_K: case R_ATTN_V: case R_ATTN_O: case R_FFN_GATE: case R_FFN_UP: case R_FFN_DOWN: return 1; default: return 0; }
+  switch(role){ case R_TOK_EMBD: case R_OUTPUT: case R_ATTN_Q: case R_ATTN_K: case R_ATTN_V: case R_ATTN_O:
+    case R_FFN_GATE: case R_FFN_UP: case R_FFN_DOWN:
+    case R_CONV_IN: case R_CONV_OUT: return 1; default: return 0; }
 }
 static void quant_block_q4_0(const f32 *x, u8 *dst){
   f32 amax=0; for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax) amax=a; } f32 d=amax/7.0f; if(d<=0) d=1e-9f; u16 sd=f32_to_half(d); memcpy(dst,&sd,2);
