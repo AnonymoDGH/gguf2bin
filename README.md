@@ -85,6 +85,14 @@ $ gguf2bin2 chat qwen.g2bx --no-think --swap --threads 4
 | Tokenizer (Qwen vocab ~250k) | Yes (~30–60 MB) | — |
 | Logits (vocab×4B) | Yes (~1 MB × 250k) | — |
 
+
+## v4.4 changes
+
+- **--drop N (ShortGPT)**: mide Block Influence (1-cos entrada/salida) por bloque
+  durante una calibracion rapida y omite los N bloques menos influyentes.
+  Implementado en los tres caminos (Qwen/Llama secuencial, batched y LFM2).
+  En LFM2.5-1.2B el tradeoff no compensa (BI minimo 0.106): queda como
+  herramienta para modelos con bloques redundantes.
 ## v4.3 changes
 
 - **Kernel Q4_0 de decode con acumulación diferida**: el dot entero por bloque

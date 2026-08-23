@@ -16,6 +16,20 @@
 
 #define RECENT_CAP 128
 #define RECENT_USE 64
+static const char *DEFAULT_CALIB =
+  "The city council approved the new budget on Tuesday after months of debate. "
+  "Residents expressed concerns about traffic congestion and public transportation. "
+  "El ayuntamiento aprobó el nuevo presupuesto después de meses de debate. "
+  "Scientists published a study showing that ocean temperatures have risen steadily. "
+  "The engineer designed a circuit that reduces power consumption by forty percent. "
+  "In the morning she reads the news while drinking coffee near the window. "
+  "Machine learning models transform input vectors through many matrix multiplications. "
+  "Los estudiantes caminaron por la plaza hasta la biblioteca central del campus. "
+  "A river runs through the valley, feeding the fields where farmers grow wheat. "
+  "The report recommends investing in renewable energy and modernizing the grid. "
+  "Every weekend the market fills with people buying fruit, bread and flowers. "
+  "Software updates usually fix bugs but sometimes introduce new problems. ";
+
 
 static void set_threads(int n){
 #if defined(_OPENMP)
@@ -89,7 +103,7 @@ static void usage(const char *a0){
     "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
     "      --fast             exprime todo: prioridad alta, max hilos, sin swap\n"
     "      --threads N        numero de cores OpenMP (def: todos)\n"
-    "      --seed N           semilla reproducible para el muestreo\n\n"
+    "      --drop N           omite los N bloques menos influyentes (ShortGPT)\n\n"
     "bench extra:\n"
     "      --prefill N        mide tok/s de procesamiento de prompt (sin logits)\n\n"
     "Ejemplos:\n"
@@ -111,19 +125,7 @@ static int load_any(const char *path, Model *m){
   return model_load_gguf(path,m);
 }
 /* corpus genérico embebido para calibrar la poda si no se da --calib */
-static const char *DEFAULT_CALIB =
-  "The city council approved the new budget on Tuesday after months of debate. "
-  "Residents expressed concerns about traffic congestion and public transportation. "
-  "El ayuntamiento aprobó el nuevo presupuesto después de meses de debate. "
-  "Scientists published a study showing that ocean temperatures have risen steadily. "
-  "The engineer designed a circuit that reduces power consumption by forty percent. "
-  "In the morning she reads the news while drinking coffee near the window. "
-  "Machine learning models transform input vectors through many matrix multiplications. "
-  "Los estudiantes caminaron por la plaza hasta la biblioteca central del campus. "
-  "A river runs through the valley, feeding the fields where farmers grow wheat. "
-  "The report recommends investing in renewable energy and modernizing the grid. "
-  "Every weekend the market fills with people buying fruit, bread and flowers. "
-  "Software updates usually fix bugs but sometimes introduce new problems. ";
+
 
 static int cmd_pack(int argc, char **argv){
   if(argc<4){ usage(argv[0]); return 1; }
@@ -372,7 +374,7 @@ static int cmd_run(int argc, char **argv){
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0;
+  u64 seed=0; int ndrop=0;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
@@ -402,6 +404,9 @@ static int cmd_run(int argc, char **argv){
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
+    i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
+    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
   if(text[0] && m.tok){
     i32 *enc; i32 en=tokenize_prefix(m.tok,text,&enc);
     if(en>0){
@@ -468,6 +473,7 @@ static int cmd_ppl(int argc, char **argv){
   const char *path=argv[2];
   const char *file=NULL; i32 maxtok=4096;
   i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  int ndrop=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
     else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
@@ -477,11 +483,17 @@ static int cmd_ppl(int argc, char **argv){
     else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
   { const char *sw = swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(nthr>0) set_threads(nthr);
+  if(ndrop>0 && m.tok){
+    i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
+    i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
+    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids);
+  }
   if(!m.tok){ fprintf(stderr,"ppl: el modelo no trae tokenizer\n"); model_free(&m); return 1; }
   char *text=NULL; size_t cap=0, len=0;
   if(file && strcmp(file,"-")){
@@ -542,7 +554,7 @@ static int cmd_chat(int argc, char **argv){
   const char *path=argv[2];
   i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0;
+  u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -557,12 +569,16 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--no-think")) no_think=1;
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
+    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
+    i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
+    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
   if(!m.tok){ fprintf(stderr,"chat: el modelo no trae tokenizer. Re-empaqueta\n"); model_free(&m); return 1; }
   Tokenizer *tk=m.tok;
   i32 im_start=find_tok(tk,"<|im_start|>"), im_end=find_tok(tk,"<|im_end|>");
@@ -677,7 +693,7 @@ static double now_sec(void){
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  i32 prefill_n=0; u64 seed=0;
+  i32 prefill_n=0; u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -689,11 +705,15 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
+    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
   }
   Model m; if(load_any(argv[2],&m)) return 1;
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
+    i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
+    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
   rng_seed(seed);
   i32 maxctx = m.ctx>0?m.ctx:m.c.seq_len;
   if(prefill_n>0){

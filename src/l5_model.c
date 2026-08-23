@@ -604,8 +604,11 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
   if(dbg&&pos<3){ f32 s=0; for(i32 i=0;i<dim;i++) s+=x[i]*x[i]; fprintf(stderr,"[dbg] pos=%d post-embdnorm |x|=%g\n",pos,sqrtf(s)); }
 
   for(i32 L=0;L<c->n_layers;L++){
+      if(m->skip_layer && m->skip_layer[L]) continue; /* ShortGPT: bloque redundante */
     Slot *an=slot_get(m,R_ATTN_NORM,L);
     load_vec_f32(m,an,row,dim); rmsnorm(xb,x,row,dim,c->eps);
+    if(m->collect_bi){ f32 *pre=m->bi_pre+(size_t)L*dim; f32 s=0;
+      for(i32 i=0;i<dim;i++){ pre[i]=x[i]; s+=x[i]*x[i]; } m->bi_n2p[L]+=s; }
     if(dbg&&pos<1&&L<3){ f32 s=0,w=0,w2=0,xr=0; for(i32 i=0;i<dim;i++){ s+=xb[i]*xb[i]; w+=row[i]; w2+=row[i]*row[i]; xr+=x[i]*x[i]; }
       fprintf(stderr,"[dbg] L%d: |x_resid|=%g rms_w=%g |xb|=%g\n",L,sqrtf(xr),sqrtf(w2/dim),sqrtf(s)); }
 
@@ -709,8 +712,9 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
     }
     matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
     for(i32 i=0;i<dim;i++) x[i]+=xb[i];
-    if(dbg&&pos<3){ f32 s=0; for(i32 i=0;i<dim;i++) s+=x[i]*x[i];
-      fprintf(stderr,"[dbg]   L%d(%s) |x|=%g\n",L,wq?"att":"conv",sqrtf(s)); }
+    if(m->collect_bi){ const f32 *pre=m->bi_pre+(size_t)L*dim; f32 dot=0,s=0;
+      for(i32 i=0;i<dim;i++){ dot+=pre[i]*x[i]; s+=x[i]*x[i]; }
+      m->bi_dot[L]+=dot; m->bi_n2[L]+=s; }
   }
 
   { /* LFM2 no tiene output_norm: reutiliza token_embd_norm al final */
@@ -762,8 +766,11 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   gguf_dequant(emb->type, ep, x, (u64)dim);
 
   for(i32 L=0;L<c->n_layers;L++){
+      if(m->skip_layer && m->skip_layer[L]) continue; /* ShortGPT: bloque redundante */
     Slot *an=slot_get(m,R_ATTN_NORM,L);
     load_vec_f32(m,an,row,dim); rmsnorm(xb,x,row,dim,c->eps);
+    if(m->collect_bi){ f32 *pre=m->bi_pre+(size_t)L*dim; f32 s=0;
+      for(i32 i=0;i<dim;i++){ pre[i]=x[i]; s+=x[i]*x[i]; } m->bi_n2p[L]+=s; }
 
     Slot *wq=slot_get(m,R_ATTN_Q,L);
     Slot *wk=slot_get(m,R_ATTN_K,L);
@@ -925,6 +932,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
     }
 
     for(i32 L=0;L<c->n_layers;L++){
+      if(m->skip_layer && m->skip_layer[L]) continue; /* ShortGPT */
       Slot *an=slot_get(m,R_ATTN_NORM,L);
       load_vec_f32(m,an,row,dim);
       for(i32 t=0;t<B;t++) rmsnorm(xb+(size_t)t*dim,x+(size_t)t*dim,row,dim,c->eps);
@@ -1066,6 +1074,43 @@ int model_collect_stats(Model *m, const i32 *toks, i32 n){
 }
 void model_free_stats(Model *m){
   free(m->ffn_stats); m->ffn_stats=NULL; m->collect_stats=0;
+}
+
+/* ── ShortGPT: Block Influence = 1 - cos(entrada, salida) por bloque ── */
+int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop){
+  if(!m || !toks || n<8 || ndrop<=0) return -1;
+  i32 nl=m->c.n_layers, dim=m->c.dim;
+  free(m->skip_layer);
+  m->skip_layer=calloc((size_t)nl,1);
+  m->bi_pre=(f32*)malloc((size_t)nl*(size_t)dim*sizeof(f32));
+  m->bi_dot=calloc((size_t)nl,sizeof(f32));
+  m->bi_n2=calloc((size_t)nl,sizeof(f32));
+  m->bi_n2p=calloc((size_t)nl,sizeof(f32));
+  if(!m->skip_layer||!m->bi_pre||!m->bi_dot||!m->bi_n2||!m->bi_n2p) return -1;
+  m->collect_bi=1;
+  for(i32 p=0;p<n;p++) model_forward_ex(m,toks[p],p,NULL,0);
+  m->collect_bi=0;
+  typedef struct { f32 bi; i32 L; } BIS;
+  BIS *bis=malloc((size_t)nl*sizeof(BIS));
+  for(i32 L=0;L<nl;L++){
+    f32 cosv = (m->bi_n2p[L]>0 && m->bi_n2[L]>0)?
+      m->bi_dot[L]/sqrtf(m->bi_n2p[L]*m->bi_n2[L]) : 1.f;
+    bis[L].bi=1.f-cosv; bis[L].L=L;
+  }
+  for(int a=0;a+1<nl;a++){ int b=a;
+    for(int c2=a+1;c2<nl;c2++) if(bis[c2].bi<bis[b].bi) b=c2;
+    if(b!=a){ BIS t=bis[a]; bis[a]=bis[b]; bis[b]=t; } }
+  fprintf(stderr,"drop: Block Influence:");
+  for(i32 L=0;L<nl;L++) fprintf(stderr," %d:%.3f",bis[L].L,(double)bis[L].bi);
+  fprintf(stderr,"\n");
+  for(int k=0;k<ndrop && k<nl;k++){
+    m->skip_layer[bis[k].L]=1;
+    fprintf(stderr,"drop: omitiendo bloque %d (BI=%.4f)\n",bis[k].L,(double)bis[k].bi);
+  }
+  free(bis);
+  free(m->bi_pre); free(m->bi_dot); free(m->bi_n2); free(m->bi_n2p);
+  m->bi_pre=m->bi_dot=m->bi_n2=m->bi_n2p=NULL;
+  return 0;
 }
 
 static void pack_q4_0_const(u8 *dst, i32 n, f32 scale){

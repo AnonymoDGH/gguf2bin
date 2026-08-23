@@ -111,6 +111,11 @@ typedef struct {
   i32 ctx;                    /* contexto efectivo en runtime (<= c.seq_len) */
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
   f32 *conv_state;            /* LFM2: estado conv por capa [L][K-1][dim] */
+  /* ShortGPT: salto de bloques redundantes */
+  u8 *skip_layer;             /* [n_layers] 1=omitir bloque completo */
+  f32 *bi_pre, *bi_post;      /* scratch dim para medir Block Influence */
+  f32 *bi_dot, *bi_n2, *bi_n2p; /* acumuladores [n_layers]: dot(pre,post), |post|², |pre|² */
+  u8 collect_bi;
   /* recolección de estadísticas FFN para poda calibrada */
   u8 collect_stats;
   f32 *ffn_stats;             /* [n_layers x hidden]: Σ|silu(g)·u| por neurona */
@@ -155,6 +160,8 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits);
 /* Calibración para poda: acumula Σ|silu(g)·u| por neurona sobre tokens. */
 int model_collect_stats(Model *m, const i32 *toks, i32 n);
 void model_free_stats(Model *m);
+/* ShortGPT: mide Block Influence por capa y marca las `ndrop` menos influyentes. */
+int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop);
 i32 model_sample(f32 *logits, i32 n, f32 temp);
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
