@@ -9,14 +9,23 @@ real RAM budget is **KV cache + activations + tokenizer**, not the model file.
 Sustained decode with `--fast` (high priority, OpenMP threads, quantized KV).
 The DDR3L memory bus (~9.4 GB/s) is the hard ceiling; Q4_0 sits at ~50 % of it.
 
-| Model (G2BX) | Format | Weights (mmap) | Runtime RAM | tok/s |
-|--------------|--------|----------------|-------------|-------|
-| Qwen3-0.6B | Q8_0 | 604 MB | 503 MB (auto-Q8, ctx 8192) | 11.4 |
-| Qwen3-0.6B | Q4_0 | 319 MB | 503 MB (auto-Q8, ctx 8192) | **12–14** |
-| Qwen3-0.6B | Q4_0 | 319 MB | **145 MB (**`--q8-kv -c 2048`**)** | 12.4 |
-| Qwen3-0.6B | Q4_0 | 319 MB | **37 MB (**`--swap`**)** | 11.1 |
-| SmolLM2-360M | Q4_0 | 194 MB | 657 MB | 18.3 |
-| SmolLM2-135M | Q4_0 | 72 MB | 40 MB (`-c 2048`) | **35** |
+| Model (G2BX) | Format | Weights (mmap) | Runtime RAM | tok/s v3.5 | tok/s v4.3 |
+|--------------|--------|----------------|-------------|------------|------------|
+| **Qwen2.5-3B** | Q4_0 | 1992 MB | 145 MB (`--fast --q8-kv`) | 1.5 | **4.3** |
+| Qwen3-0.6B | Q4_0 | 319 MB | 145 MB (`--q8-kv -c 2048`) | 18.8 | **16.1** |
+| SmolLM2-135M | Q4_0 | 72 MB | 40 MB (`--q8-kv -c 2048`) | 53.6 | **59.5** |
+
+Qwen2.5-3B decode at 4.3 tok/s streams 8.6 GB/s — essentially the DDR3L bus
+ceiling; the v3.5 kernel managed only 3 GB/s. The deferred-accumulation Q4_0
+kernel (one horizontal sum per row instead of one per 32-elem block) closed the
+gap. Batched prefill runs at the kernel compute ceiling (~27 GMAC/s).
+
+Prompt processing (prefill, ~771 tokens, Qwen3-0.6B q4, ctx 2048, misma sesión):
+**45.7 s → 26.0 s (1.76×)** — el matmul final vocab×dim se salta durante el prompt
+y los tokens se procesan en chunks de 8 por pasada de pesos (prefill batcheado,
+verificado bit-exacto contra el forward secuencial con `tools/prefilltest`).
+Generation with sampling (-n 192, t 0.7): **23.4 s → 13.4 s (1.75×)** —
+quickselect top-k + Gumbel-max replace a full 152k-element `qsort` per token.
 
 **RAM minimum / maximum (footprint the OS can't page out):**
 - **Minimum ≈ 37 MB** runtime with `--swap` (KV backed on disk, weights mmap;
@@ -75,6 +84,75 @@ $ gguf2bin2 chat qwen.g2bx --no-think --swap --threads 4
 | Buffers / activations | Yes (small) | — |
 | Tokenizer (Qwen vocab ~250k) | Yes (~30–60 MB) | — |
 | Logits (vocab×4B) | Yes (~1 MB × 250k) | — |
+
+## v4.3 changes
+
+- **Kernel Q4_0 de decode con acumulación diferida**: el dot entero por bloque
+  se convierte y escala en un acumulador `__m256` (FMA) con UN hsum por fila —
+  antes había un hsum por bloque de 32 (≈la mitad del coste del kernel).
+  Qwen2.5-3B: 3.1 → **4.3 tok/s** (2.9× vs v3.5); Qwen3-0.6B: +10%.
+- Soporte **Q5_0 end-to-end** (dequant escalar + kernel fusionado AVX2 con LUT
+  de bits altos): los GGUF reales tipo Q4_K_M de modelos pequeños usan Q5_0 en
+  attn/ffn; antes se descartaban esos tensores silenciosamente.
+- Tabla de calidad medida (comando ppl, corpus README, SmolLM2-135M-Instruct):
+  uniforme-Q4_0 = ppl **73.7** (roto), Q4_K_M nativo = **48.7**, Q6_K = 48.0,
+  Q8_0 = 48.0. Los packs nativos K-quant conservan la calidad del Q8_0 dentro
+  del 1.4% y corren MÁS rápido que el uniforme-Q4_0.
+
+## v4.2 changes
+
+- **Kernels AVX2 fusionados para Q4_K y Q6_K**: dot entero contra activación
+  Q8 sin dequantizar la fila (`maddubs` + término de corrección m·Σx con sumas
+  por bloque de 16). Antes cualquier pack con K-quants caía al fallback
+  dequant-por-fila (2-5× más lento). Validados contra una referencia
+  independiente byte a byte con `tools/qkcheck` (rel_err ≈ nivel de cuantización
+  de la activación; batch B=2 idéntico a B=1).
+- **Comando `ppl`**: harness de calidad (cross-entropy / perplexity sobre un
+  texto) para medir el impacto real de los quants.
+- **bench min-of-3** en decode y prefill: los portátiles con thermal throttling
+  mienten; se reporta el mejor de 3 repeticiones.
+- Limpieza: campo `kvrow` muerto eliminado, `srand()` muertos fuera,
+  semilla temporal cuando no hay `--seed`.
+
+## v4.1 changes
+
+- **K-quants arreglados contra la referencia oficial ggml**: `deq_q3_K`,
+  `deq_q4_K` y `deq_q5_K` estaban rotos desde v3.4 (mitad del tensor sin
+  escribir + interleave de escalas incorrecto) → un GGUF Q3/Q4/Q5_K producía
+  basura silenciosa, incluso al reempaquetar con `--q4`. Ahora verificados
+  línea a línea con ggml-quants.c (Q2_K y Q6_K ya eran correctos).
+- **Prefill batcheado** (`model_prefill`, B=8): cada fila de pesos se lee UNA
+  vez para 8 tokens; cada fila K/V se dequantiza una vez para todo el chunk;
+  atención causal batched. Logits idénticos bit a bit al camino secuencial.
+- **Validación de geometría en carga**: `n_heads % n_kv_heads != 0` ahora es
+  error; `head_dim % 32 != 0` fuerza KV F32 (evitaba lecturas fuera de bloque).
+- **Guard de contigüidad** antes de fusionar QKV / gate+up (con padding ALIGN64
+  la fusión habría corrompido silenciosamente).
+- **Scratch persistente** de activación Q8 (global, cuantizado en el hilo
+  maestro): elimina ~210 malloc/free por token del kernel Q4.
+- `model_sample()` ya no usa rand() (RAND_MAX=32767 en Windows).
+
+## v4.0 changes
+
+- **Prefill sin logits** (`model_forward_ex(..., want_logits)`): durante el
+  prompt solo el último token calcula logits (matmul vocab×dim, ~87 MB de
+  tráfico por token en vocab 152k). Prefill 1.32× más rápido.
+- **Atención GQA-major**: cada fila K/V se dequantiza UNA vez por grupo de
+  heads (antes `group` veces: ×2–8 menos trabajo de dequant + softmax AVX2).
+- **softmax/silu AVX2** con exp rápida vectorizada (reducción rango + Horner
+  deg-6, err rel <2e-7); `silu_mul` fusiona gate×up (una pasada menos).
+- **Fix rmsnorm AVX2**: la cola de la suma solo cubría `n&7` elementos; para
+  dims no múltiplo de 32 la norma era incorrecta.
+- **Sampling nuevo**: quickselect top-k O(n) (antes qsort de 152k por token),
+  truco Gumbel-max para muestreo softmax exacto sin exponenciales, PRNG
+  xorshift64* (`rand()`/RAND_MAX=32767 en Windows rompía la distribución) y
+  `--seed N` reproducible. Generación con sampling: 1.72× más rápida.
+- **GGUF por mmap** en el parser: empaquetar modelos grandes ya no copia el
+  archivo completo a RAM.
+- **Compactación de contexto en chat**: si el turno no cabe, conserva system +
+  turnos recientes y re-prefill; chats largos ya no mueren con ctx pequeño.
+- **bench --prefill N**: mide tok/s de procesamiento de prompt.
+- g2bx info: nombres de roles de bias; limpieza general.
 
 ## v3.4 / v3.5 changes
 
@@ -181,14 +259,16 @@ Slot: role:u8 layer:u16 type:u8 nbytes:u32 off:u64
 
 ```
 include/g2b.h
-src/l1_gguf.c    # GGUF parser
+src/l1_gguf.c    # GGUF parser (mmap)
 src/l2_codec.c   # dequant + matmul (Q8_0/Q4_0 AVX2; K-quant dequant)
-src/l3_math.c    # rmsnorm, rope, silu, f32_to_half
+src/l3_math.c    # rmsnorm, rope, silu, softmax AVX2 + exp rápida
 src/l4_gbin.c    # G2BX pack (generic per-architecture read_cfg)
-src/l5_model.c   # load + forward + KV Q8 + RAM budget
+src/l5_model.c   # load + forward + KV Q8 + RAM budget + atención GQA-major
 src/l6_token.c   # BPE tokenizer
-src/main.c       # CLI
+src/main.c       # CLI (sampling quickselect/Gumbel, chat con compactación)
 tools/kvtest.c   # numerical KV F32 vs Q8 check
+tools/prefilltest.c # equivalencia bit-exacta prefill batcheado vs secuencial
+tools/exptest.c  # accuracy test del exp vectorizado
 tools/mmbench.c  # raw kernel bandwidth microbench
 tools/dump_gguf.py
 docs/RESEARCH.md

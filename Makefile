@@ -1,6 +1,6 @@
 # gguf2bin2 — G2BX runtime (C99) — FIXED v3.3
 CC      ?= gcc
-CFLAGS  ?= -O3 -mavx2 -mfma -fopenmp -std=c99 -Wall -Wextra -Iinclude
+CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -Iinclude
 LDFLAGS ?= -lm -fopenmp
 
 SRC = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \

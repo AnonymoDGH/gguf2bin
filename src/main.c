@@ -76,8 +76,9 @@ static void usage(const char *a0){
     "      --tokens a,b  ids directos\n"
     "      --bos         prepend BOS\n"
     "  %s synth  <out.g2bx>\n"
-    "  %s bench  <model> [-n N]\n"
-    "  %s chat   <model> [-n N] [-t TEMP] [--no-think]\n\n"
+    "  %s bench  <model> [-n N] [--prefill N]\n"
+    "  %s chat   <model> [-n N] [-t TEMP] [--no-think]\n"
+    "  %s ppl    <model> [-f fichero|-] [-n max_tokens]\n\n"
     "RAM / contexto (run, chat, bench):\n"
     "      -c N / --ctx N     contexto efectivo (KV cache) en runtime (def: el del modelo)\n"
     "      --q8-kv            KV cache cuantizada Q8_0 (~3.8x menos RAM que F32)\n"
@@ -85,12 +86,15 @@ static void usage(const char *a0){
     "      --max-ram MB       presupuesto RAM: auto-Q8 + baja ctx hasta caber (ej: 2048)\n"
     "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
     "      --fast             exprime todo: prioridad alta, max hilos, sin swap\n"
-    "      --threads N        numero de cores OpenMP (def: todos)\n\n"
+    "      --threads N        numero de cores OpenMP (def: todos)\n"
+    "      --seed N           semilla reproducible para el muestreo\n\n"
+    "bench extra:\n"
+    "      --prefill N        mide tok/s de procesamiento de prompt (sin logits)\n\n"
     "Ejemplos:\n"
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
     "  %s chat qwen.g2bx --no-think -t 0.7\n"
     "  %s bench qwen.g2bx --max-ram 2048\n",
-    a0,a0,a0,a0,a0,a0,a0,a0,a0);
+    a0,a0,a0,a0,a0,a0,a0,a0,a0,a0);
 }
 
 static int ends_with(const char *s, const char *suf){
@@ -159,7 +163,7 @@ static const char *default_swap(void){
 #if defined(_WIN32)
   static char buf[300];
   if(drive_ok("D:\\")) snprintf(buf,sizeof buf,"D:\\gguf2bin2_kv.swap");
-  else { if(!GetTempPathA(sizeof buf,buf)) strcpy(buf,"C:\\"); strncat(buf,"gguf2bin2_kv.swap",sizeof buf-1); }
+  else { if(!GetTempPathA(sizeof buf,buf)) strcpy(buf,"C:\\"); strncat(buf,"gguf2bin2_kv.swap",sizeof buf-strlen(buf)-1); }
   return buf;
 #else
   return "/tmp/gguf2bin2_kv.swap";
@@ -196,30 +200,73 @@ static int apply_ram_opts(Model *m, i32 ctx, u64 max_ram, int q8kv, int f32kv, c
 
 /* sampling con top-k, top-p, repeat penalty (penalty se aplica UNA sola vez) */
 typedef struct { int id; float logit; } TokLogit;
-static int cmp_logit_desc(const void *a, const void *b){
-  float fa=((const TokLogit*)a)->logit, fb=((const TokLogit*)b)->logit;
-  return (fa<fb)-(fa>fb);
+
+/* PRNG xorshift64*: rand()/RAND_MAX=32767 en Windows destrozaba el muestreo */
+static u64 g_rng = 0x9E3779B97F4A7C15ull;
+static void rng_seed(u64 s){
+  g_rng = s ? s : (0x9E3779B97F4A7C15ull ^ (u64)time(NULL));
+  for(int i=0;i<4;i++){ g_rng^=g_rng>>12; g_rng^=g_rng<<25; g_rng^=g_rng>>27; }
+}
+static inline float rnd_f(void){
+  g_rng^=g_rng>>12; g_rng^=g_rng<<25; g_rng^=g_rng>>27;
+  return (float)(((g_rng*2685821657736338717ull)>>40)*(1.0/16777216.0)); /* [0,1) */
 }
 
 static void apply_repeat_penalty(float *logits, int n, float penalty, const i32 *recent, int recent_n){
   if(penalty==1.f || !recent || recent_n<=0) return;
-  /* Dedup: mark once so the same id is not penalized multiple times. */
-  u8 *seen = calloc((size_t)n, 1);
+  static u8 *seen=NULL; static int seen_n=0;
+  if(seen_n<n){ free(seen); seen=(u8*)calloc((size_t)n,1); seen_n=seen?n:0; }
   if(!seen){
     for(int i=0;i<recent_n;i++){
       int id=recent[i]; if(id<0||id>=n) continue;
-      float v=logits[id];
-      if(v>0) logits[id]=v/penalty; else logits[id]=v*penalty;
+      float v=logits[id]; logits[id]=v>0?v/penalty:v*penalty;
     }
     return;
   }
+  memset(seen,0,(size_t)n);
   for(int i=0;i<recent_n;i++){
     int id=recent[i]; if(id<0||id>=n||seen[id]) continue;
     seen[id]=1;
-    float v=logits[id];
-    if(v>0) logits[id]=v/penalty; else logits[id]=v*penalty;
+    float v=logits[id]; logits[id]=v>0?v/penalty:v*penalty;
   }
-  free(seen);
+}
+
+/* Quickselect descendente: deja los k mayores en a[0..k-1] (sin orden). O(n) vs qsort O(n log n). */
+static void topk_select(TokLogit *a, int n, int k){
+  if(k<=0) return; if(k>=n) return;
+  int lo=0, hi=n-1;
+  while(lo<hi){
+    int mid=lo+(hi-lo)/2;
+    if(a[mid].logit>a[lo].logit){ TokLogit t=a[mid]; a[mid]=a[lo]; a[lo]=t; }
+    if(a[hi].logit>a[lo].logit){ TokLogit t=a[hi]; a[hi]=a[lo]; a[lo]=t; }
+    if(a[hi].logit>a[mid].logit){ TokLogit t=a[hi]; a[hi]=a[mid]; a[mid]=t; }
+    float p=a[mid].logit;
+    int i=lo, j=hi;
+    while(i<=j){
+      while(a[i].logit>p) i++;
+      while(a[j].logit<p) j--;
+      if(i<=j){ TokLogit t=a[i]; a[i]=a[j]; a[j]=t; i++; j--; }
+    }
+    if(k<=j) hi=j;
+    else if(k>=i) lo=i;
+    else break;
+  }
+}
+
+/* Muestreo softmax exacto por truco Gumbel-max: argmax(l/T + Gumbel) ~ softmax(l/T). O(n), sin exp. */
+static int gumbel_sample(const float *logits, int n){
+  int bi=0; float bs=-1e30f;
+  for(int i=0;i<n;i++){
+    float u=rnd_f(); if(u<1e-7f) u=1e-7f; else if(u>0.9999999f) u=0.9999999f;
+    float v=logits[i]-logf(-logf(u));
+    if(v>bs){ bs=v; bi=i; }
+  }
+  return bi;
+}
+
+static int cmp_logit_desc(const void *x, const void *y){
+  float a=((const TokLogit*)x)->logit, b=((const TokLogit*)y)->logit;
+  return (a<b)-(a>b);
 }
 
 static i32 sample_advanced(float *logits, int n, float temp, int top_k, float top_p,
@@ -234,37 +281,37 @@ static i32 sample_advanced(float *logits, int n, float temp, int top_k, float to
   }
 
   for(int i=0;i<n;i++) logits[i]/=temp;
-  TokLogit *arr=malloc((size_t)n*sizeof(TokLogit));
-  if(!arr){
-    int bi=0; float bv=logits[0];
-    for(int i=1;i<n;i++) if(logits[i]>bv){ bv=logits[i]; bi=i; }
-    return bi;
+
+  if(top_k<=0 || top_k>=n){
+    if(top_p>=1.f) return gumbel_sample(logits,n);
+    /* top_p solo: ordenar es inevitable para el corte nucleus */
   }
+
+  TokLogit *arr=(TokLogit*)malloc((size_t)n*sizeof(TokLogit));
+  if(!arr) return gumbel_sample(logits,n);
   for(int i=0;i<n;i++){ arr[i].id=i; arr[i].logit=logits[i]; }
+
   int keep=n;
-  qsort(arr, (size_t)n, sizeof(TokLogit), cmp_logit_desc);
-  if(top_k>0 && top_k<n) keep=top_k;
-  float maxl=arr[0].logit;
-  float sum=0.f;
+  if(top_k>0 && top_k<n){
+    topk_select(arr,n,top_k);
+    /* insertion sort del prefijo k (k pequeno: tipico 20-100) */
+    for(int i=1;i<top_k;i++){ TokLogit v=arr[i]; int j=i-1; while(j>=0&&arr[j].logit<v.logit){ arr[j+1]=arr[j]; j--; } arr[j+1]=v; }
+    keep=top_k;
+  } else {
+    qsort(arr,(size_t)n,sizeof(TokLogit),cmp_logit_desc);
+  }
+  float maxl=arr[0].logit, sum=0.f;
   for(int i=0;i<keep;i++){ float e=expf(arr[i].logit-maxl); arr[i].logit=e; sum+=e; }
-  for(int i=0;i<keep;i++) arr[i].logit/=sum;
   if(top_p<1.f){
-    float cumsum=0.f; int last=keep;
-    for(int i=0;i<keep;i++){ cumsum+=arr[i].logit; if(cumsum>=top_p){ last=i+1; break; } }
+    float cum=0.f; int last=keep;
+    for(int i=0;i<keep;i++){ cum+=arr[i].logit/sum; if(cum>=top_p){ last=i+1; break; } }
     keep=last;
   }
-  if(keep<n && keep>0){
-    sum=0.f; for(int i=0;i<keep;i++) sum+=arr[i].logit;
-    if(sum>0.f) for(int i=0;i<keep;i++) arr[i].logit/=sum;
-  }
-  if(keep<=0){ int id=arr[0].id; free(arr); return id; }
-  float r=(float)rand()/(float)RAND_MAX;
-  float cum=0.f;
-  for(int i=0;i<keep;i++){
-    cum+=arr[i].logit;
-    if(r<=cum){ int id=arr[i].id; free(arr); return id; }
-  }
-  int id=arr[keep-1].id; free(arr); return id;
+  float r=rnd_f()*sum, cum=0.f;
+  int id=arr[keep-1].id;
+  for(int i=0;i<keep;i++){ cum+=arr[i].logit; if(r<=cum){ id=arr[i].id; break; } }
+  free(arr);
+  return id;
 }
 
 static int cmd_run(int argc, char **argv){
@@ -272,6 +319,7 @@ static int cmd_run(int argc, char **argv){
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  u64 seed=0;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
@@ -287,6 +335,7 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
@@ -312,12 +361,13 @@ static int cmd_run(int argc, char **argv){
   if(!np) prompt[np++]=1;
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
-  srand((unsigned)time(NULL));
+  rng_seed(seed);
+  if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
   i32 pos=0;
   RecentBuf recent; memset(&recent,0,sizeof recent);
   i32 rep_tmp[RECENT_USE];
 
-  for(i32 i=0;i<np;i++){
+  for(i32 i=0;i<np;){
     if(pos >= m.ctx){
       fprintf(stderr,"\nrun: contexto lleno (ctx=%d); truncando prompt\n", m.ctx);
       break;
@@ -326,12 +376,21 @@ static int cmd_run(int argc, char **argv){
       fprintf(stderr,"run: token id %d fuera de vocab (%d)\n", prompt[i], m.c.vocab);
       free(logits); model_free(&m); return 1;
     }
-    model_forward(&m,prompt[i],pos,logits);
-    if(m.tok && !(use_bos && i==0 && prompt[i]==m.tok->bos)){
-      i32 one=prompt[i]; char *p=tok_decode(m.tok,&one,1); printf("%s",p); free(p);
-    } else if(!m.tok) printf("%d ",prompt[i]);
-    recent_push(&recent, prompt[i]);
-    pos++;
+    i32 chunk=np-i; if(chunk>8) chunk=8; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
+    if(chunk<=0) break;
+    int want=(i+chunk>=np)?1:0; /* logits solo del último token del prompt */
+    int rc=model_prefill(&m,&prompt[i],chunk,pos,want?logits:NULL);
+    if(rc){
+      for(i32 j=0;j<chunk;j++)
+        model_forward_ex(&m,prompt[i+j],pos+j,(want&&j==chunk-1)?logits:NULL,want&&j==chunk-1);
+    }
+    if(m.tok){
+      if(use_bos && i==0 && prompt[i]==m.tok->bos){
+        if(chunk>1){ char *p=tok_decode(m.tok,&prompt[i+1],chunk-1); printf("%s",p); free(p); }
+      } else { char *p=tok_decode(m.tok,&prompt[i],chunk); printf("%s",p); free(p); }
+    } else { for(i32 j=0;j<chunk;j++) printf("%d ",prompt[i+j]); }
+    for(i32 j=0;j<chunk;j++) recent_push(&recent, prompt[i+j]);
+    pos+=chunk; i+=chunk;
   }
   for(i32 i=0;i<n_tok;i++){
     if(pos >= m.ctx){
@@ -349,6 +408,69 @@ static int cmd_run(int argc, char **argv){
   printf("\n"); free(logits); model_free(&m); return 0;
 }
 
+/* ppl: cross-entropy del modelo sobre un texto (harness de calidad).
+   Uso: ppl <model> [-f fichero|-] [-n max_tokens] [opts RAM] */
+static int cmd_ppl(int argc, char **argv){
+  if(argc<3){ usage(argv[0]); return 1; }
+  const char *path=argv[2];
+  const char *file=NULL; i32 maxtok=4096;
+  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  for(int i=3;i<argc;i++){
+    if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
+    else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
+    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
+    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
+    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
+    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
+    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
+  }
+  Model m; if(load_any(path,&m)) return 1;
+  { const char *sw = swap;
+    if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
+  if(nthr>0) set_threads(nthr);
+  if(!m.tok){ fprintf(stderr,"ppl: el modelo no trae tokenizer\n"); model_free(&m); return 1; }
+  char *text=NULL; size_t cap=0, len=0;
+  if(file && strcmp(file,"-")){
+    FILE *f=fopen(file,"rb");
+    if(!f){ fprintf(stderr,"ppl: no abro %s\n",file); model_free(&m); return 1; }
+    char buf[65536]; size_t r;
+    while((r=fread(buf,1,sizeof buf,f))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; }
+    fclose(f);
+  } else {
+    char buf[65536]; size_t r;
+    while((r=fread(buf,1,sizeof buf,stdin))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; }
+  }
+  if(!text || len==0){ fprintf(stderr,"ppl: texto vacio\n"); free(text); model_free(&m); return 1; }
+  text[len]=0;
+  i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
+  free(text);
+  if(nt>maxtok) nt=maxtok;
+  if(nt<2){ fprintf(stderr,"ppl: <2 tokens\n"); free(ids); model_free(&m); return 1; }
+  fprintf(stderr,"ppl: %d tokens, ctx=%d\n",nt,m.ctx);
+  f32 *logits=malloc((size_t)m.c.vocab*sizeof(f32));
+  if(!logits){ free(ids); model_free(&m); return 1; }
+  double nll=0; i32 count=0;
+  i32 win=m.ctx>0?m.ctx:m.c.seq_len;
+  for(i32 base=0; base<nt-1; base+=win){
+    i32 end = base+win<nt ? base+win : nt;
+    for(i32 p=base; p<end-1; p++){
+      model_forward_ex(&m,ids[p],p-base,logits,1);
+      /* NLL del token ids[p+1] */
+      f32 mx=logits[0];
+      for(i32 v=1;v<m.c.vocab;v++) if(logits[v]>mx) mx=logits[v];
+      double lse=0;
+      for(i32 v=0;v<m.c.vocab;v++) lse+=exp((double)(logits[v]-mx));
+      lse=log(lse)+mx;
+      nll += lse-(double)logits[ids[p+1]];
+      count++;
+    }
+  }
+  printf("ppl(%s): tokens=%d evaluados=%d nll/token=%.4f perplexity=%.3f\n",
+    path,nt,count,nll/(count?count:1),exp(nll/(count?count:1)));
+  free(logits); free(ids); model_free(&m); return 0;
+}
+
 static int cmd_synth(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   return exp_synth_qwen_tiny(argv[2])?1:0;
@@ -363,6 +485,7 @@ static int cmd_chat(int argc, char **argv){
   const char *path=argv[2];
   i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  u64 seed=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -376,6 +499,7 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--no-think")) no_think=1;
+    else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
@@ -390,15 +514,18 @@ static int cmd_chat(int argc, char **argv){
   if(im_start<0||im_end<0){ fprintf(stderr,"chat: faltan tokens especiales\n"); model_free(&m); return 1; }
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
-  srand((unsigned)time(NULL));
+  rng_seed(seed);
+  if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
   i32 *conv=NULL; i32 cn=0, ccap=2048; conv=malloc((size_t)ccap*sizeof(i32));
   if(!conv){ free(logits); model_free(&m); return 1; }
-#define PUSH(x) do{ if(cn>=ccap){ ccap*=2; conv=realloc(conv,(size_t)ccap*sizeof(i32)); if(!conv){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); return 1; } } conv[cn++]=(x); }while(0)
+#define PUSH(x) do{ if(cn>=ccap){ ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
+  i32 sys_len=0;
   {
     i32 *st; i32 sn=tok_encode(tk,"system\nYou are a helpful assistant.",&st);
     PUSH(im_start); for(i32 i=0;i<sn;i++) PUSH(st[i]); PUSH(im_end);
     i32 *nl; i32 nnl=tok_encode(tk,"\n",&nl); for(i32 i=0;i<nnl;i++) PUSH(nl[i]); free(nl); free(st);
   }
+  sys_len=cn;
   i32 pos=0, fed=0;
   char line[8192];
   printf("=== Chat Qwen3 %s (escribe 'salir') ===\n", no_think?"[no-think]":"[thinking]");
@@ -421,12 +548,36 @@ static int cmd_chat(int argc, char **argv){
       i32 *nn2; i32 n2=tok_encode(tk,"\n\n",&nn2); for(i32 i=0;i<n2;i++) PUSH(nn2[i]); free(nn2);
     }
     free(ut); free(at);
-    for(; fed<cn; fed++){
+    /* Compactacion: si el turno no cabe, conserva system + turnos recientes y re-prefill */
+    {
+      i32 need = (cn-fed) + n_tok + 4;
+      if(pos + need > m.ctx){
+        i32 budget=m.ctx/2;
+        i32 tail=budget-sys_len; if(tail<64) tail=64;
+        i32 start=cn-tail; if(start<sys_len) start=sys_len;
+        while(start<cn && conv[start]!=im_start) start++;
+        if(start>=cn){ start=cn-16; if(start<sys_len) start=sys_len; }
+        fprintf(stderr,"chat: contexto lleno (%d/%d) -> compacto a system + %d tokens recientes\n",
+          pos,m.ctx,cn-start);
+        memmove(conv+sys_len,conv+start,(size_t)(cn-start)*sizeof(i32));
+        cn=sys_len+(cn-start);
+        fed=0; pos=0;
+      }
+    }
+    for(; fed<cn;){
       if(pos >= m.ctx){
         fprintf(stderr,"chat: contexto lleno (ctx=%d)\n", m.ctx);
         break;
       }
-      model_forward(&m,conv[fed],pos++,logits);
+      i32 chunk=cn-fed; if(chunk>8) chunk=8; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
+      if(chunk<=0) break;
+      int want=(fed+chunk>=cn)?1:0;
+      int rc=model_prefill(&m,&conv[fed],chunk,pos,want?logits:NULL);
+      if(rc){
+        for(i32 j=0;j<chunk;j++)
+          model_forward_ex(&m,conv[fed+j],pos+j,(want&&j==chunk-1)?logits:NULL,want&&j==chunk-1);
+      }
+      pos+=chunk; fed+=chunk;
     }
     if(pos >= m.ctx){ printf("\n"); continue; }
     printf("Qwen3> "); fflush(stdout);
@@ -469,6 +620,7 @@ static double now_sec(void){
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  i32 prefill_n=0; u64 seed=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -478,20 +630,54 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--fast")) fast=1;
     else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
+    else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
   }
   Model m; if(load_any(argv[2],&m)) return 1;
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  rng_seed(seed);
+  i32 maxctx = m.ctx>0?m.ctx:m.c.seq_len;
+  if(prefill_n>0){
+    /* prefill batcheado: B tokens por pasada de pesos, sin logits (min de 3) */
+    if(prefill_n > maxctx-4) prefill_n=maxctx-4;
+    double best=1e30;
+    for(int rep=0;rep<3;rep++){
+      double t0=now_sec();
+      i32 done=0;
+      while(done<prefill_n){
+        i32 chunk=prefill_n-done; if(chunk>8) chunk=8;
+        i32 tokv[8];
+        for(i32 j=0;j<chunk;j++) tokv[j]=(i32)((done+j) % (m.c.vocab>1?m.c.vocab:1));
+        if(model_prefill(&m,tokv,chunk,done,NULL)){
+          for(i32 j=0;j<chunk;j++)
+            model_forward_ex(&m,tokv[j],done+j,NULL,0);
+        }
+        done+=chunk;
+      }
+      double sec=now_sec()-t0;
+      if(sec<best) best=sec;
+    }
+    if(best<1e-9) best=1e-9;
+    fprintf(stderr,"bench-prefill: %d tokens en %.3fs -> %.1f tok/s (min de 3) (dim=%d L=%d ctx=%d)\n",
+      prefill_n,best,prefill_n/best,m.c.dim,m.c.n_layers,m.ctx);
+    model_free(&m); return 0;
+  }
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
   model_forward(&m,1,0,logits);
-  double t0=now_sec();
-  for(i32 i=0;i<n;i++)
-    model_forward(&m, (i32)(i % (m.c.vocab>1?m.c.vocab:1)), (i32)(i % (m.ctx>0?m.ctx:m.c.seq_len)), logits);
-  double sec=now_sec()-t0; if(sec<1e-9) sec=1e-9;
-  fprintf(stderr,"bench: %d tokens in %.4fs -> %.1f tok/s  (dim=%d L=%d hd=%d ctx=%d)\n",
-    n,sec,n/sec,m.c.dim,m.c.n_layers,m.c.head_dim,m.ctx);
+  double best=1e30;
+  for(int rep=0;rep<3;rep++){ /* min-of-3: la térmica de un portátil miente */
+    double t0=now_sec();
+    for(i32 i=0;i<n;i++)
+      model_forward(&m, (i32)(i % (m.c.vocab>1?m.c.vocab:1)), (i32)(i % (m.ctx>0?m.ctx:m.c.seq_len)), logits);
+    double sec=now_sec()-t0;
+    if(sec<best) best=sec;
+  }
+  if(best<1e-9) best=1e-9;
+  fprintf(stderr,"bench: %d tokens in %.4fs -> %.1f tok/s (min de 3)  (dim=%d L=%d hd=%d ctx=%d)\n",
+    n,best,n/best,m.c.dim,m.c.n_layers,m.c.head_dim,m.ctx);
   free(logits); model_free(&m); return 0;
 }
 
@@ -503,5 +689,6 @@ int main(int argc, char **argv){
   if(!strcmp(argv[1],"synth")) return cmd_synth(argc,argv);
   if(!strcmp(argv[1],"bench")) return cmd_bench(argc,argv);
   if(!strcmp(argv[1],"chat"))  return cmd_chat(argc,argv);
+  if(!strcmp(argv[1],"ppl"))   return cmd_ppl(argc,argv);
   usage(argv[0]); return 1;
 }

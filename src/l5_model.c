@@ -57,6 +57,7 @@ static void q8_quant_row(const f32 *src, u8 *dst, i32 n){
     dst+=34;
   }
 }
+#if !defined(__AVX2__)
 static void q8_dequant_row(const u8 *src, f32 *out, i32 n){
   for(i32 off=0; off<n; off+=32){
     f32 s=half_to_float(*(const u16*)src); src+=2;
@@ -65,6 +66,33 @@ static void q8_dequant_row(const u8 *src, f32 *out, i32 n){
     src+=32;
   }
 }
+#endif
+
+#if defined(__AVX2__)
+void q8_dequant_row_avx2(const u8 *src, f32 *out, i32 n){
+  for(i32 off=0; off<n; off+=32){
+    f32 sf=half_to_float(*(const u16*)src); src+=2;
+    __m256 vs=_mm256_set1_ps(sf);
+    __m256i q8=_mm256_loadu_si256((const __m256i*)src); src+=32;
+    __m128i lo=_mm256_castsi256_si128(q8), hi=_mm256_extracti128_si256(q8,1);
+    i32 m=(n-off)<32?(n-off):32;
+    if(m==32){
+      _mm256_storeu_ps(out+off,   _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),vs));
+      _mm256_storeu_ps(out+off+8, _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))),vs));
+      _mm256_storeu_ps(out+off+16,_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),vs));
+      _mm256_storeu_ps(out+off+24,_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))),vs));
+    } else {
+      /* tail: dequant completo y copia parcial */
+      f32 tmp[32];
+      _mm256_storeu_ps(tmp,   _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),vs));
+      _mm256_storeu_ps(tmp+8, _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo,8))),vs));
+      _mm256_storeu_ps(tmp+16,_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),vs));
+      _mm256_storeu_ps(tmp+24,_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi,8))),vs));
+      memcpy(out+off,tmp,(size_t)m*4);
+    }
+  }
+}
+#endif
 
 #if defined(_WIN32)
 /* Respaldar la KV cache en un archivo (p.ej. D:) -> páginas frías se vuelcan a disco. */
@@ -111,40 +139,65 @@ static void kv_swap_free(Model *m){
 #endif
 
 static void free_rt(Model *m){
-  free(m->buf); free(m->kvrow);
-  m->buf=NULL; m->kvrow=NULL;
+#ifdef DBG_RT
+  fprintf(stderr,"free_rt: buf=%p pool=%p B=%d\n",(void*)m->buf,(void*)m->pf_pool,m->pf_B);
+#endif
+  free(m->buf);
+  m->buf=NULL;
+  free(m->pf_pool);
+  m->pf_pool=NULL;
+  m->pf_x=m->pf_xb=m->pf_hb=m->pf_hb2=m->pf_q=m->pf_k=m->pf_v=m->pf_att=NULL;
+  m->pf_B=0;
   if(m->use_swap && m->swap_view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
 }
+#define G2BX_PF_B 8
 static int alloc_rt(Model *m, i32 ctx){
   ModelCfg *c=&m->c;
   i32 dim=c->dim, hid=c->hidden_dim, hd=c->head_dim;
   i32 nq=c->n_heads*hd, nkv=c->n_kv_heads*hd;
-  int q8=(m->flags&F_KV_Q8)?1:0;
+  int q8=((m->flags&F_KV_Q8) && !m->no_kv_q8)?1:0;
   i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
   i32 nbuf=dim*3 + hid*2 + nq + nkv*2 + c->n_heads*ctx + maxn;
   m->buf=malloc((size_t)nbuf*sizeof(f32)); /* no calloc: se sobreescribe antes de leer */
-  m->kvrow=malloc((size_t)nkv*sizeof(f32));
-  if(!m->buf || !m->kvrow) return -1;
+  if(!m->buf) return -1;
   size_t half = 0, usize = 0;
   if(q8){ size_t qr=kv_q8_rowsize(nkv); half=(size_t)c->n_layers*(size_t)ctx*qr; }
   else   half=(size_t)c->n_layers*(size_t)ctx*(size_t)nkv*sizeof(f32);
   usize=2*half;
   if(m->swap_path && kv_swap_alloc(m,usize)==0){
-    /* kcache y vcache son dos mitades de una vista contigua */
     u8 *base=(u8*)m->swap_view;
     if(q8){ m->kcq=base; m->vcq=base+half; m->kcache=NULL; m->vcache=NULL; }
     else  { m->kcache=(f32*)base; m->vcache=(f32*)(base+half); m->kcq=NULL; m->vcq=NULL; }
-    return 0;
-  }
-  if(q8){
-    m->kcq=malloc(half); m->vcq=malloc(half);
-    if(!m->kcq || !m->vcq){ free_rt(m); return -1; }
   } else {
-    m->kcache=malloc(half); m->vcache=malloc(half);
-    if(!m->kcache || !m->vcache){ free_rt(m); return -1; }
+    if(q8){
+      m->kcq=malloc(half); m->vcq=malloc(half);
+      if(!m->kcq || !m->vcq){ free_rt(m); return -1; }
+    } else {
+      m->kcache=malloc(half); m->vcache=malloc(half);
+      if(!m->kcache || !m->vcache){ free_rt(m); return -1; }
+    }
   }
+  /* buffers del prefill batcheado */
+  i32 B=G2BX_PF_B;
+  size_t nx=(size_t)B*(size_t)(dim + dim + hid*2 + nq + nkv*2)*sizeof(f32)
+           +(size_t)B*(size_t)c->n_heads*(size_t)ctx*sizeof(f32);
+  f32 *pool=malloc(nx);
+  if(!pool){ /* sin prefill batcheado, pero el runtime secuencial funciona */ m->pf_B=0; return 0; }
+  m->pf_pool=pool;
+  m->pf_B=B;
+  m->pf_x=pool; pool+=(size_t)B*dim;
+  m->pf_xb=pool; pool+=(size_t)B*dim;
+  m->pf_hb=pool; pool+=(size_t)B*hid;
+  m->pf_hb2=pool; pool+=(size_t)B*hid;
+  m->pf_q=pool; pool+=(size_t)B*nq;
+  m->pf_k=pool; pool+=(size_t)B*nkv;
+  m->pf_v=pool; pool+=(size_t)B*nkv;
+  m->pf_att=pool;
+#ifdef DBG_RT
+  fprintf(stderr,"alloc_rt: buf=%p pool=%p B=%d nx=%.1fMB ctx=%d\n",(void*)m->buf,(void*)m->pf_pool,B,nx/1048576.0,ctx);
+#endif
   return 0;
 }
 
@@ -174,6 +227,7 @@ int model_set_ctx(Model *m, i32 ctx){
 }
 
 /* Estimación de RAM residente del runtime (excluye pesos: mmap→page cache evictable). */
+static int kv_is_q8(const Model *m){ return (m->flags&F_KV_Q8) && !m->no_kv_q8; }
 static u64 est_for(Model *m, i32 ctx, int q8){
   ModelCfg *c=&m->c;
   i32 nkv=c->n_kv_heads*c->head_dim;
@@ -184,6 +238,9 @@ static u64 est_for(Model *m, i32 ctx, int q8){
   i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
   u64 nbuf=(u64)dim*3u+(u64)hid*2u+(u64)c->n_heads*c->head_dim+(u64)nkv*2u+(u64)c->n_heads*ctx+(u64)maxn;
   u64 buf=nbuf*4u;
+  /* prefill batcheado */
+  if(m->pf_B>0)
+    buf += (u64)m->pf_B*(u64)(dim+dim+hid*2+c->n_heads*c->head_dim+nkv*2+c->n_heads*ctx)*4u;
   u64 tok=0; Tokenizer *t=m->tok;
   if(t) tok=(u64)(t->n+(size_t)t->nmerges)*48u + ((size_t)1u<<19)*(8u+4u)*2u;
   return kv+buf+tok;
@@ -191,7 +248,7 @@ static u64 est_for(Model *m, i32 ctx, int q8){
 u64 model_est_ram(Model *m){
   if(!m || m->c.n_layers<=0) return 0;
   i32 ctx=m->ctx>0?m->ctx:m->c.seq_len;
-  return est_for(m, ctx, (m->flags&F_KV_Q8)?1:0);
+  return est_for(m, ctx, kv_is_q8(m));
 }
 /* Tamaño de la KV cache (K+V) para un modo dado. */
 u64 model_kv_bytes(Model *m, int q8){
@@ -204,14 +261,14 @@ u64 model_kv_bytes(Model *m, int q8){
 void model_ram_report(Model *m){
   if(!m) return;
   u64 rt=model_est_ram(m);
-  u64 kv=model_kv_bytes(m,(m->flags&F_KV_Q8)?1:0);
+  u64 kv=model_kv_bytes(m,kv_is_q8(m));
   fprintf(stderr,
     "ram: pesos=%llu MB (%s; paginas reclamables) | runtime=%llu MB "
     "= KV(%s,ctx=%d)%s + buffers + tokenizer\n",
     (unsigned long long)(m->data_size>>20), m->use_mmap?"mmap":"memcpy",
-    (unsigned long long)(rt>>20), (m->flags&F_KV_Q8)?"Q8_0":"F32", m->ctx,
+    (unsigned long long)(rt>>20), kv_is_q8(m)?"Q8_0":"F32", m->ctx,
     m->use_swap?" (file-backed)":"");
-  if(kv > ((u64)1<<30) && !(m->flags&F_KV_Q8))
+  if(kv > ((u64)1<<30) && !kv_is_q8(m))
     fprintf(stderr,"ram: aviso — KV en F32 usa ~%llu MB; pruebe --q8-kv o --swap D:\\kv.swap\n",
       (unsigned long long)(kv>>20));
 }
@@ -219,7 +276,7 @@ void model_ram_report(Model *m){
 /* Encaja el modelo en un presupuesto de RAM: primero KV→Q8_0, luego baja ctx. */
 int model_auto_budget(Model *m, u64 max_ram){
   if(!m || !max_ram || m->c.n_layers<=0) return -1;
-  int q8=(m->flags&F_KV_Q8)?1:0;
+  int q8=kv_is_q8(m);
   i32 ctx=m->c.seq_len>0?m->c.seq_len:2048;
   if(!q8 && est_for(m,ctx,0)>max_ram){ q8=1; m->flags|=F_KV_Q8; }
   while(ctx>256 && est_for(m,ctx,q8)>max_ram) ctx/=2;
@@ -234,7 +291,7 @@ static size_t kv_pos_offset(Model *m, i32 layer, i32 pos){
 }
 static void kv_store(Model *m, i32 layer, i32 pos, const f32 *k, const f32 *v){
   i32 nkv=m->c.n_kv_heads*m->c.head_dim;
-  if(m->flags&F_KV_Q8){
+  if(kv_is_q8(m)){
     size_t qr=kv_q8_rowsize(nkv);
     u8 *kb=m->kcq+((size_t)layer*m->ctx+(size_t)pos)*qr;
     u8 *vb=m->vcq+((size_t)layer*m->ctx+(size_t)pos)*qr;
@@ -245,22 +302,37 @@ static void kv_store(Model *m, i32 layer, i32 pos, const f32 *k, const f32 *v){
     memcpy(kc,k,(size_t)nkv*4); memcpy(vc,v,(size_t)nkv*4);
   }
 }
-static void kv_key_row(Model *m, i32 layer, i32 pos, f32 *out){
-  i32 nkv=m->c.n_kv_heads*m->c.head_dim;
-  if(m->flags&F_KV_Q8){
+/* Dequant solo la fila de UN head (hd elementos), no la fila KV completa.
+   head_dim múltiplo de 32 → el segmento cae en límite de bloque Q8
+   (garantizado en carga: si no, no_kv_q8 fuerza KV F32). */
+static void kv_key_row_h(Model *m, i32 layer, i32 pos, i32 kvh, f32 *out){
+  i32 nkv=m->c.n_kv_heads*m->c.head_dim, hd=m->c.head_dim;
+  i32 eo=kvh*hd;
+  if(kv_is_q8(m)){
     size_t qr=kv_q8_rowsize(nkv);
-    q8_dequant_row(m->kcq+((size_t)layer*m->ctx+(size_t)pos)*qr, out, nkv);
+    const u8 *src=m->kcq+((size_t)layer*m->ctx+(size_t)pos)*qr + (size_t)(eo/32)*34u;
+#if defined(__AVX2__)
+    q8_dequant_row_avx2(src, out, hd);
+#else
+    q8_dequant_row(src, out, hd);
+#endif
   } else {
-    memcpy(out, m->kcache+kv_pos_offset(m,layer,pos), (size_t)nkv*4);
+    memcpy(out, m->kcache+kv_pos_offset(m,layer,pos)+(size_t)eo, (size_t)hd*4);
   }
 }
-static void kv_val_row(Model *m, i32 layer, i32 pos, f32 *out){
-  i32 nkv=m->c.n_kv_heads*m->c.head_dim;
-  if(m->flags&F_KV_Q8){
+static void kv_val_row_h(Model *m, i32 layer, i32 pos, i32 kvh, f32 *out){
+  i32 nkv=m->c.n_kv_heads*m->c.head_dim, hd=m->c.head_dim;
+  i32 eo=kvh*hd;
+  if(kv_is_q8(m)){
     size_t qr=kv_q8_rowsize(nkv);
-    q8_dequant_row(m->vcq+((size_t)layer*m->ctx+(size_t)pos)*qr, out, nkv);
+    const u8 *src=m->vcq+((size_t)layer*m->ctx+(size_t)pos)*qr + (size_t)(eo/32)*34u;
+#if defined(__AVX2__)
+    q8_dequant_row_avx2(src, out, hd);
+#else
+    q8_dequant_row(src, out, hd);
+#endif
   } else {
-    memcpy(out, m->vcache+kv_pos_offset(m,layer,pos), (size_t)nkv*4);
+    memcpy(out, m->vcache+kv_pos_offset(m,layer,pos)+(size_t)eo, (size_t)hd*4);
   }
 }
 
@@ -379,6 +451,19 @@ static int load_header_body(FILE *f, Model *m, const char *path){
 
   if(m->c.seq_len<=0) m->c.seq_len=2048;
 
+  /* validación de geometría: sin esto, GQA y KV Q8 leen fuera de rango en silencio */
+  if(m->c.n_kv_heads<=0) m->c.n_kv_heads=m->c.n_heads;
+  if(m->c.n_heads % m->c.n_kv_heads){
+    fprintf(stderr,"model: n_heads=%d no divisible por n_kv_heads=%d — GQA inválida\n",
+      m->c.n_heads,m->c.n_kv_heads);
+    return -1;
+  }
+  if(m->c.head_dim<=0 && m->c.n_heads) m->c.head_dim=m->c.dim/m->c.n_heads;
+  if(m->c.head_dim % 32){
+    m->no_kv_q8=1; /* el slice por head no cae en bloque Q8 */
+    fprintf(stderr,"model: head_dim=%d no múltiplo de 32 — KV cache forzada a F32\n",m->c.head_dim);
+  }
+
   build_index(m);
   if(model_set_ctx(m, m->c.seq_len)){
     fprintf(stderr,"model: OOM en buffers de runtime\n"); return -1;
@@ -441,10 +526,6 @@ static void load_vec_f32(Model *m, Slot *s, f32 *dst, i32 n){
   gguf_dequant(s->type, slot_ptr(m,s), dst, (u64)n);
 }
 
-static u64 row_stride(u32 type, i32 n){
-  return (n/ggml_block_size(type))*ggml_type_bytes(type);
-}
-
 static void apply_rope(Model *m, f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
   /* Llama: interleaved pairs. Qwen2/Qwen3: NEOX half-split. */
   if(m->arch == ARCH_LLAMA) rope_th_llama(x, len, pos, head_dim, theta);
@@ -458,7 +539,49 @@ static int require_slot(Slot *s, const char *what, i32 layer){
   return -1;
 }
 
+/* dot y fma sobre head_dim: AVX2 (4 acumuladores) con fallback escalar.
+   Igual matemática que la atención previa, ahora reutilizable por head. */
+static inline f32 dot_hd(const f32 *a, const f32 *b, i32 n){
+#if defined(__AVX2__)
+  __m256 s0=_mm256_setzero_ps(), s1=_mm256_setzero_ps(), s2=_mm256_setzero_ps(), s3=_mm256_setzero_ps();
+  i32 j=0;
+  for(;j+31<n;j+=32){
+    s0=_mm256_fmadd_ps(_mm256_loadu_ps(a+j),   _mm256_loadu_ps(b+j),   s0);
+    s1=_mm256_fmadd_ps(_mm256_loadu_ps(a+j+8), _mm256_loadu_ps(b+j+8), s1);
+    s2=_mm256_fmadd_ps(_mm256_loadu_ps(a+j+16),_mm256_loadu_ps(b+j+16),s2);
+    s3=_mm256_fmadd_ps(_mm256_loadu_ps(a+j+24),_mm256_loadu_ps(b+j+24),s3);
+  }
+  __m256 ss=_mm256_add_ps(_mm256_add_ps(s0,s1),_mm256_add_ps(s2,s3));
+  __m128 lo=_mm256_castps256_ps128(ss), hi=_mm256_extractf128_ps(ss,1);
+  lo=_mm_add_ps(lo,hi); lo=_mm_add_ps(lo,_mm_movehl_ps(lo,lo)); lo=_mm_add_ss(lo,_mm_shuffle_ps(lo,lo,1));
+  f32 s=_mm_cvtss_f32(lo);
+  for(;j<n;j++) s+=a[j]*b[j];
+  return s;
+#else
+  f32 s=0; for(i32 j=0;j<n;j++) s+=a[j]*b[j]; return s;
+#endif
+}
+static inline void fma_hd(f32 *dst, const f32 *src, f32 scale, i32 n){
+#if defined(__AVX2__)
+  __m256 va=_mm256_set1_ps(scale);
+  i32 j=0;
+  for(;j+31<n;j+=32){
+    _mm256_storeu_ps(dst+j,   _mm256_fmadd_ps(va,_mm256_loadu_ps(src+j),   _mm256_loadu_ps(dst+j)));
+    _mm256_storeu_ps(dst+j+8, _mm256_fmadd_ps(va,_mm256_loadu_ps(src+j+8), _mm256_loadu_ps(dst+j+8)));
+    _mm256_storeu_ps(dst+j+16,_mm256_fmadd_ps(va,_mm256_loadu_ps(src+j+16),_mm256_loadu_ps(dst+j+16)));
+    _mm256_storeu_ps(dst+j+24,_mm256_fmadd_ps(va,_mm256_loadu_ps(src+j+24),_mm256_loadu_ps(dst+j+24)));
+  }
+  for(;j<n;j++) dst[j]+=scale*src[j];
+#else
+  for(i32 j=0;j<n;j++) dst[j]+=scale*src[j];
+#endif
+}
+
 void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
+  model_forward_ex(m,token,pos,logits,1);
+}
+
+void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   ModelCfg *c=&m->c;
   i32 dim=c->dim, hid=c->hidden_dim, hd=c->head_dim;
   i32 nq=c->n_heads*hd, nkv=c->n_kv_heads*hd, ctx=m->ctx;
@@ -498,9 +621,22 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
     Slot *wk=slot_get(m,R_ATTN_K,L);
     Slot *wv=slot_get(m,R_ATTN_V,L);
     if(require_slot(wq,"attn_q",L)||require_slot(wk,"attn_k",L)||require_slot(wv,"attn_v",L)) return;
-    matmul_q(q,xb,slot_ptr(m,wq),wq->type,dim,nq,row);
-    matmul_q(k,xb,slot_ptr(m,wk),wk->type,dim,nkv,row);
-    matmul_q(v,xb,slot_ptr(m,wv),wv->type,dim,nkv,row);
+    /* Fusion Q+K+V: solo si los slots son contiguos y del mismo tipo
+       (los offsets densos lo permiten; con padding ALIGN64 no). */
+    if(wq->type==wk->type && wk->type==wv->type
+       && slot_ptr(m,wk)==slot_ptr(m,wq)+wq->nbytes
+       && slot_ptr(m,wv)==slot_ptr(m,wk)+wk->nbytes)
+      matmul_q(q,xb,slot_ptr(m,wq),wq->type,dim,nq+nkv+nkv,row);
+    else {
+      matmul_q(q,xb,slot_ptr(m,wq),wq->type,dim,nq,row);
+      matmul_q(k,xb,slot_ptr(m,wk),wk->type,dim,nkv,row);
+      matmul_q(v,xb,slot_ptr(m,wv),wv->type,dim,nkv,row);
+    }
+
+    /* Sesgos de atencion (exclusivo Qwen2.5): Q += b_q, K += b_k, V += b_v */
+    { Slot *qb=slot_get(m,R_ATTN_Q_BIAS,L); if(qb){ load_vec_f32(m,qb,row,nq); for(i32 i=0;i<nq;i++) q[i]+=row[i]; }
+      Slot *kb=slot_get(m,R_ATTN_K_BIAS,L); if(kb){ load_vec_f32(m,kb,row,nkv); for(i32 i=0;i<nkv;i++) k[i]+=row[i]; }
+      Slot *vb=slot_get(m,R_ATTN_V_BIAS,L); if(vb){ load_vec_f32(m,vb,row,nkv); for(i32 i=0;i<nkv;i++) v[i]+=row[i]; } }
 
     if(m->flags & F_QK_NORM){
       Slot *qn=slot_get(m,R_ATTN_Q_NORM,L);
@@ -516,66 +652,41 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
     kv_store(m, L, pos, k, v);
 
     f32 scale=1.f/sqrtf((f32)hd);
-#if defined(__AVX2__)
-    for(i32 t=0;t<=pos;t++){
-      kv_key_row(m,L,t,m->kvrow);
-      for(i32 h=0;h<c->n_heads;h++){
-        i32 kvh=h/group; f32 *qh=q+h*hd; f32 *kt=m->kvrow+kvh*hd;
-        __m256 s0=_mm256_setzero_ps(), s1=_mm256_setzero_ps(), s2=_mm256_setzero_ps(), s3=_mm256_setzero_ps();
-        i32 jj=0;
-        for(;jj+31<hd;jj+=32){
-          s0=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj),   _mm256_loadu_ps(kt+jj),   s0);
-          s1=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+8),  _mm256_loadu_ps(kt+jj+8),  s1);
-          s2=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+16), _mm256_loadu_ps(kt+jj+16), s2);
-          s3=_mm256_fmadd_ps(_mm256_loadu_ps(qh+jj+24), _mm256_loadu_ps(kt+jj+24), s3);
-        }
-        __m256 ss=_mm256_add_ps(_mm256_add_ps(s0,s1),_mm256_add_ps(s2,s3));
-        __m128 lo=_mm256_castps256_ps128(ss), hi=_mm256_extractf128_ps(ss,1);
-        lo=_mm_add_ps(lo,hi); lo=_mm_add_ps(lo,_mm_movehl_ps(lo,lo)); lo=_mm_add_ss(lo,_mm_shuffle_ps(lo,lo,1));
-        f32 s=_mm_cvtss_f32(lo);
-        for(;jj<hd;jj++) s+=qh[jj]*kt[jj];
-        att[(size_t)h*ctx+t]=s*scale;
-      }
-    }
-    for(i32 h=0;h<c->n_heads;h++) softmax(att+(size_t)h*ctx,pos+1);
-    for(i32 j=0;j<nq;j++) q[j]=0;
-    for(i32 t=0;t<=pos;t++){
-      kv_val_row(m,L,t,m->kvrow);
-      for(i32 h=0;h<c->n_heads;h++){
-        i32 kvh=h/group; __m256 va=_mm256_set1_ps(att[(size_t)h*ctx+t]);
-        f32 *vh=m->kvrow+kvh*hd; f32 *qh=q+h*hd;
-        i32 jj=0;
-        for(;jj+31<hd;jj+=32){
-          _mm256_storeu_ps(qh+jj,  _mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj),  _mm256_loadu_ps(qh+jj)));
-          _mm256_storeu_ps(qh+jj+8,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+8),_mm256_loadu_ps(qh+jj+8)));
-          _mm256_storeu_ps(qh+jj+16,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+16),_mm256_loadu_ps(qh+jj+16)));
-          _mm256_storeu_ps(qh+jj+24,_mm256_fmadd_ps(va,_mm256_loadu_ps(vh+jj+24),_mm256_loadu_ps(qh+jj+24)));
-        }
-        f32 a=_mm_cvtss_f32(_mm256_castps256_ps128(va));
-        for(;jj<hd;jj++) qh[jj]+=a*vh[jj];
-      }
-    }
-#else
-    for(i32 t=0;t<=pos;t++){
-      kv_key_row(m,L,t,m->kvrow);
-      for(i32 h=0;h<c->n_heads;h++){
-        i32 kvh=h/group; f32 *qh=q+h*hd;
-        f32 *kt=m->kvrow+kvh*hd;
-        f32 s=0; for(i32 j=0;j<hd;j++) s+=qh[j]*kt[j];
-        att[(size_t)h*ctx+t]=s*scale;
-      }
-    }
-    for(i32 h=0;h<c->n_heads;h++) softmax(att+(size_t)h*ctx,pos+1);
-    for(i32 j=0;j<nq;j++) q[j]=0;
-    for(i32 t=0;t<=pos;t++){
-      kv_val_row(m,L,t,m->kvrow);
-      for(i32 h=0;h<c->n_heads;h++){
-        i32 kvh=h/group; f32 a=att[(size_t)h*ctx+t];
-        f32 *vh=m->kvrow+kvh*hd; f32 *qh=q+h*hd;
-        for(i32 j=0;j<hd;j++) qh[j]+=a*vh[j];
-      }
-    }
+    /* Atención GQA-major: para cada grupo kv, cada fila K/V se dequantiza UNA vez
+       y se reutiliza para todas las heads del grupo (antes: group× redundancia).
+       Scratch K/V por hilo en heap (sin VLA en región OpenMP). */
+    {
+      i32 ngrp=(c->n_heads+group-1)/group;
+#if defined(_OPENMP)
+      #pragma omp parallel if(ngrp>=2 && pos>=16)
 #endif
+      {
+        f32 *krow=(f32*)malloc((size_t)hd*sizeof(f32));
+        f32 *vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+#if defined(_OPENMP)
+        #pragma omp for schedule(static)
+#endif
+        for(i32 g=0; g<ngrp; g++){
+          i32 h0=g*group, h1=h0+group; if(h1>c->n_heads) h1=c->n_heads;
+          for(i32 t=0;t<=pos;t++){
+            kv_key_row_h(m,L,t,h0/group,krow);
+            for(i32 h=h0;h<h1;h++)
+              att[(size_t)h*ctx+t]=dot_hd(q+(size_t)h*hd,krow,hd)*scale;
+          }
+          for(i32 h=h0;h<h1;h++) softmax(att+(size_t)h*ctx,pos+1);
+          for(i32 h=h0;h<h1;h++){
+            f32 *qh=q+(size_t)h*hd;
+            for(i32 j=0;j<hd;j++) qh[j]=0.f;
+          }
+          for(i32 t=0;t<=pos;t++){
+            kv_val_row_h(m,L,t,h0/group,vrow);
+            for(i32 h=h0;h<h1;h++)
+              fma_hd(q+(size_t)h*hd,vrow,att[(size_t)h*ctx+t],hd);
+          }
+        }
+        free(krow); free(vrow);
+      }
+    }
 
     Slot *wo=slot_get(m,R_ATTN_O,L);
     if(require_slot(wo,"attn_o",L)) return;
@@ -589,16 +700,21 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
     Slot *wu=slot_get(m,R_FFN_UP,L);
     Slot *wd=slot_get(m,R_FFN_DOWN,L);
     if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
-    matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
-    matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
-    silu(hb,hid);
-    for(i32 i=0;i<hid;i++) hb[i]*=hb2[i];
+    /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
+    if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
+      matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
+    else {
+      matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
+      matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
+    }
+    silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
     matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
     for(i32 i=0;i<dim;i++) x[i]+=xb[i];
   }
 
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
+  if(!want_logits || !logits) return; /* prefill: saltar logits vocab×dim (carísimo) */
   Slot *out=slot_get(m,R_OUTPUT,-1);
   if(!out) out=slot_get(m,R_TOK_EMBD,-1);
   if(require_slot(out,"output",-1)) return;
@@ -614,9 +730,160 @@ i32 model_sample(f32 *logits, i32 n, f32 temp){
   }
   for(i32 i=0;i<n;i++) logits[i]/=temp;
   softmax(logits,n);
-  f32 r=(f32)rand()/(f32)RAND_MAX, c=0;
+  /* xorshift64* (rand()/RAND_MAX=32767 en Windows destroza la distribución) */
+  static u64 rs=0x9E3779B97F4A7C15ull;
+  rs^=rs>>12; rs^=rs<<25; rs^=rs>>27;
+  f32 r=(f32)(((rs*2685821657736338717ull)>>40)*(1.0/16777216.0));
+  f32 c=0;
   for(i32 i=0;i<n;i++){ c+=logits[i]; if(r<=c) return i; }
   return n-1;
+}
+
+/* ── Prefill batcheado: B tokens por pasada de pesos ──
+   Cada fila de pesos se lee UNA vez y se reusa para los B tokens del chunk
+   (aritmética ×B); cada fila K/V se dequantiza una vez para todo el chunk.
+   Matemáticamente equivalente al forward secuencial (mismo orden de suma). */
+int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
+  if(!m || !toks || n<=0) return -1;
+  ModelCfg *c=&m->c;
+  if(!m->pf_B || !m->pf_x){ return 1; /* sin buffers: que el llamador use el secuencial */ }
+  i32 dim=c->dim, hid=c->hidden_dim, hd=c->head_dim;
+  i32 nq=c->n_heads*hd, nkv=c->n_kv_heads*hd, ctx=m->ctx;
+  i32 group=c->n_heads/c->n_kv_heads; if(group<1) group=1;
+  if(pos0<0 || pos0+n>ctx){
+    fprintf(stderr,"prefill: rango [%d,%d) fuera de ctx=%d\n",pos0,pos0+n,ctx);
+    return -1;
+  }
+  Slot *emb=slot_get(m,R_TOK_EMBD,-1);
+  if(require_slot(emb,"tok_embd",-1)) return -1;
+
+  while(n>0){
+    i32 B=n>m->pf_B ? m->pf_B : n;
+    if(pos0+B>ctx) B=ctx-pos0;
+    if(B<=0) break;
+    f32 *x=m->pf_x, *xb=m->pf_xb, *hb=m->pf_hb, *hb2=m->pf_hb2;
+    f32 *q=m->pf_q, *k=m->pf_k, *v=m->pf_v, *att=m->pf_att;
+    f32 *row=m->buf+dim*3+hid*2+nq+nkv*2+c->n_heads*ctx; /* zona 'row' de buf */
+
+    for(i32 t=0;t<B;t++){
+      if(toks[t]<0 || toks[t]>=c->vocab){ fprintf(stderr,"prefill: token %d fuera de vocab\n",toks[t]); return -1; }
+      u8 *ep=slot_ptr(m,emb)+(size_t)toks[t]*row_stride(emb->type,dim);
+      gguf_dequant(emb->type,ep,x+(size_t)t*dim,(u64)dim);
+    }
+
+    for(i32 L=0;L<c->n_layers;L++){
+      Slot *an=slot_get(m,R_ATTN_NORM,L);
+      load_vec_f32(m,an,row,dim);
+      for(i32 t=0;t<B;t++) rmsnorm(xb+(size_t)t*dim,x+(size_t)t*dim,row,dim,c->eps);
+
+      Slot *wq=slot_get(m,R_ATTN_Q,L);
+      Slot *wk=slot_get(m,R_ATTN_K,L);
+      Slot *wv=slot_get(m,R_ATTN_V,L);
+      if(require_slot(wq,"attn_q",L)||require_slot(wk,"attn_k",L)||require_slot(wv,"attn_v",L)) return -1;
+      matmul_q_b(q,xb,slot_ptr(m,wq),wq->type,dim,nq,B);
+      matmul_q_b(k,xb,slot_ptr(m,wk),wk->type,dim,nkv,B);
+      matmul_q_b(v,xb,slot_ptr(m,wv),wv->type,dim,nkv,B);
+
+      { Slot *qb=slot_get(m,R_ATTN_Q_BIAS,L);
+        if(qb){ load_vec_f32(m,qb,row,nq); for(i32 t=0;t<B;t++){ f32 *qq=q+(size_t)t*nq; for(i32 i=0;i<nq;i++) qq[i]+=row[i]; } }
+        Slot *kb=slot_get(m,R_ATTN_K_BIAS,L);
+        if(kb){ load_vec_f32(m,kb,row,nkv); for(i32 t=0;t<B;t++){ f32 *kk=k+(size_t)t*nkv; for(i32 i=0;i<nkv;i++) kk[i]+=row[i]; } }
+        Slot *vb=slot_get(m,R_ATTN_V_BIAS,L);
+        if(vb){ load_vec_f32(m,vb,row,nkv); for(i32 t=0;t<B;t++){ f32 *vv=v+(size_t)t*nkv; for(i32 i=0;i<nkv;i++) vv[i]+=row[i]; } } }
+
+      if(m->flags & F_QK_NORM){
+        Slot *qn=slot_get(m,R_ATTN_Q_NORM,L);
+        Slot *kn=slot_get(m,R_ATTN_K_NORM,L);
+        if(qn){ load_vec_f32(m,qn,row,hd); for(i32 t=0;t<B;t++) qk_rmsnorm(q+(size_t)t*nq,row,c->n_heads,hd,c->eps); }
+        if(kn){ load_vec_f32(m,kn,row,hd); for(i32 t=0;t<B;t++) qk_rmsnorm(k+(size_t)t*nkv,row,c->n_kv_heads,hd,c->eps); }
+      }
+
+      for(i32 t=0;t<B;t++){
+        apply_rope(m,q+(size_t)t*nq,nq,pos0+t,hd,c->rope_theta);
+        apply_rope(m,k+(size_t)t*nkv,nkv,pos0+t,hd,c->rope_theta);
+        kv_store(m,L,pos0+t,k+(size_t)t*nkv,v+(size_t)t*nkv);
+      }
+
+      f32 scale=1.f/sqrtf((f32)hd);
+      /* atención batched: scores [B][heads][ctx]; K/V dequant una vez por posición */
+      {
+        i32 ngrp=(c->n_heads+group-1)/group;
+#if defined(_OPENMP)
+        #pragma omp parallel if(ngrp>=2 && pos0+B>=8)
+#endif
+        {
+          f32 *krow=(f32*)malloc((size_t)hd*sizeof(f32));
+          f32 *vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+#if defined(_OPENMP)
+          #pragma omp for schedule(static)
+#endif
+          for(i32 g=0;g<ngrp;g++){
+            i32 h0=g*group, h1=h0+group; if(h1>c->n_heads) h1=c->n_heads;
+            for(i32 p=0;p<pos0+B;p++){
+              kv_key_row_h(m,L,p,h0/group,krow);
+              i32 tmin = p>=pos0 ? p-pos0 : 0;
+              for(i32 t=tmin;t<B;t++)
+                for(i32 h=h0;h<h1;h++)
+                  att[((size_t)t*c->n_heads+h)*ctx+p]=dot_hd(q+(size_t)t*nq+(size_t)h*hd,krow,hd)*scale;
+            }
+            for(i32 t=0;t<B;t++)
+              for(i32 h=h0;h<h1;h++)
+                softmax(att+((size_t)t*c->n_heads+h)*ctx,pos0+t+1);
+            for(i32 t=0;t<B;t++)
+              for(i32 h=h0;h<h1;h++){
+                f32 *qh=q+(size_t)t*nq+(size_t)h*hd;
+                for(i32 j=0;j<hd;j++) qh[j]=0.f;
+              }
+            for(i32 p=0;p<pos0+B;p++){
+              kv_val_row_h(m,L,p,h0/group,vrow);
+              i32 tmin = p>=pos0 ? p-pos0 : 0;
+              for(i32 t=tmin;t<B;t++)
+                for(i32 h=h0;h<h1;h++)
+                  fma_hd(q+(size_t)t*nq+(size_t)h*hd,vrow,att[((size_t)t*c->n_heads+h)*ctx+p],hd);
+            }
+          }
+          free(krow); free(vrow);
+        }
+      }
+
+      Slot *wo=slot_get(m,R_ATTN_O,L);
+      if(require_slot(wo,"attn_o",L)) return -1;
+      matmul_q_b(xb,q,slot_ptr(m,wo),wo->type,nq,dim,B);
+      for(i32 t=0;t<B;t++){
+        f32 *xt=x+(size_t)t*dim, *xbt=xb+(size_t)t*dim;
+        for(i32 i=0;i<dim;i++) xt[i]+=xbt[i];
+      }
+
+      Slot *fn=slot_get(m,R_FFN_NORM,L);
+      load_vec_f32(m,fn,row,dim);
+      for(i32 t=0;t<B;t++) rmsnorm(xb+(size_t)t*dim,x+(size_t)t*dim,row,dim,c->eps);
+
+      Slot *wg=slot_get(m,R_FFN_GATE,L);
+      Slot *wu=slot_get(m,R_FFN_UP,L);
+      Slot *wd=slot_get(m,R_FFN_DOWN,L);
+      if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return -1;
+      matmul_q_b(hb ,xb,slot_ptr(m,wg),wg->type,dim,hid,B);
+      matmul_q_b(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,B);
+      for(i32 t=0;t<B;t++) silu_mul(hb+(size_t)t*hid,hb2+(size_t)t*hid,hid);
+      matmul_q_b(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,B);
+      for(i32 t=0;t<B;t++){
+        f32 *xt=x+(size_t)t*dim, *xbt=xb+(size_t)t*dim;
+        for(i32 i=0;i<dim;i++) xt[i]+=xbt[i];
+      }
+    }
+
+    if(last_logits && n-B==0){ /* solo el último chunk contiene el token final */
+      Slot *on=slot_get(m,R_OUT_NORM,-1);
+      load_vec_f32(m,on,row,dim);
+      rmsnorm(m->buf,x+(size_t)(B-1)*dim,row,dim,c->eps);
+      Slot *out=slot_get(m,R_OUTPUT,-1);
+      if(!out) out=emb;
+      matmul_q(last_logits,m->buf,slot_ptr(m,out),out->type,dim,c->vocab,row);
+      last_logits=NULL;
+    }
+    pos0+=B; toks+=B; n-=B;
+  }
+  return 0;
 }
 
 static void pack_q4_0_const(u8 *dst, i32 n, f32 scale){
