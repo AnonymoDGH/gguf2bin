@@ -385,7 +385,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   int used_mmap = 0;
 #if defined(_WIN32)
   {
-    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING | FILE_FLAG_SEQUENTIAL_SCAN,
                             FILE_ATTRIBUTE_NORMAL, NULL);
     if(hf != INVALID_HANDLE_VALUE){
       LARGE_INTEGER fsz;

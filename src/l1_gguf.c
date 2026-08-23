@@ -89,7 +89,7 @@ int gguf_load(const char *path, GGUF *g){
   {
     int mapped=0;
 #if defined(_WIN32)
-    HANDLE hf=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    HANDLE hf=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING|FILE_FLAG_SEQUENTIAL_SCAN,FILE_ATTRIBUTE_NORMAL,NULL);
     if(hf!=INVALID_HANDLE_VALUE){
       HANDLE hm=CreateFileMappingA(hf,NULL,PAGE_READONLY,0,0,NULL);
       if(hm){
