@@ -817,6 +817,14 @@ void matmul_q4_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
 }
 #endif
 u64 row_stride(u32 type, i32 n){ return (n/ggml_block_size(type))*ggml_type_bytes(type); }
+/* matmul de un rango de filas [r0,r1) — para dual band CPU+GPU del head */
+void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0, i32 r1){
+  if(!out||!x||!w||r1<=r0) return;
+  u64 st=row_stride(type,n);
+  i32 d=r1-r0;
+  if(type==T_Q4_0){ matmul_q4_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
+  if(type==T_Q8_0){ matmul_q8_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
+}
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(!out || !x || !w || n<=0 || d<=0 || B<=0){
     if(out && d>0 && B>0) memset(out, 0, (size_t)d*B*sizeof(f32));

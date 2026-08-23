@@ -57,6 +57,7 @@ f32 half_to_float(u16 h); void gguf_dequant(u32 type, u8 *src, f32 *out, u64 ne)
 void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
 void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
 void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row);
+void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0, i32 r1);
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B); /* out[B*d] */
 void matmul(f32 *xout, f32 *x, f32 *w, i32 n, i32 d);
 u64  row_stride(u32 type, i32 n);
@@ -148,6 +149,13 @@ typedef struct {
 } Model;
 
 int model_load_g2bx(const char *path, Model *m);
+/* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
+int  vk_worker_main(int argc, char **argv);          /* modo --gpu-worker (proceso hijo) */
+int  vk_dual_start(Model *m, const char *model_path); /* arranca worker (--gpu) */
+void vk_dual_stop(void);
+int  vk_dual_active(void);
+/* Devuelve 1 si calculó los logits completos (GPU rango + CPU resto), 0 si no hay GPU. */
+int  vk_head_dual(f32 *logits, const f32 *x, const u8 *w, u32 type, i32 n, i32 vocab);
 int model_load_gguf(const char *path, Model *m);
 void model_free(Model *m);
 int model_set_ctx(Model *m, i32 ctx);

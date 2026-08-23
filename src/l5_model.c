@@ -877,6 +877,8 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   Slot *out=slot_get(m,R_OUTPUT,-1);
   if(!out) out=slot_get(m,R_TOK_EMBD,-1);
   if(require_slot(out,"output",-1)) return;
+  /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
+  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return;
   matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
 }
 

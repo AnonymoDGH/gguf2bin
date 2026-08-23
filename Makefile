@@ -1,10 +1,10 @@
 # gguf2bin2 — G2BX runtime (C99) — FIXED v3.3
 CC      ?= gcc
-CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -Iinclude
+CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -Iinclude -IVulkan-Headers-1.3.290/include
 LDFLAGS ?= -lm -fopenmp
 
 SRC = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
-      src/l5_model.c src/l6_token.c src/main.c
+      src/l5_model.c src/l6_token.c src/main.c src/l7_vulkan.c
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)
   EXE = $(BIN).exe

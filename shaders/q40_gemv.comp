@@ -1,0 +1,33 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : enable
+layout(local_size_x=64) in;
+layout(set=0,binding=0) readonly buffer W { uint wu[]; };
+layout(set=0,binding=1) readonly buffer X { float xv[]; };
+layout(set=0,binding=2) buffer O { float outv[]; };
+/* PC: rows=filas a procesar (row0+rows<=vocab), nsb=bloques de 32 por fila (n/32),
+   row0=primera fila, pad=alineacion u32 de una fila (nsb*17) */
+layout(push_constant) uniform PC { uint rows; uint nsb; uint row0; uint pad; } pc;
+void main(){
+  uint row = gl_GlobalInvocationID.x;
+  if(row >= pc.rows) return;
+  uint rowBase = (pc.row0 + row) * pc.pad;
+  uint nb = pc.nsb;
+  float acc = 0.0;
+  for(uint b=0u; b<nb; b++){
+    /* bloque Q4_0: 17 u32 = escala f16 (bits bajos) + 4 palabras de datos */
+    uint sb = rowBase + b*17u;
+    float d = unpackHalf2x16(wu[sb]).x;
+    for(uint k=0u;k<4u;k++){
+      uint wd = wu[sb + 1u + k];
+      uint byteIdx = k*4u;
+      for(uint j=0u;j<4u;j++,byteIdx++){
+        uint byt = (wd >> (j*8u)) & 0xFFu;
+        float lo = float(byt & 0xFu) - 8.0;
+        float hi = float(byt >> 4u) - 8.0;
+        acc += d*lo*xv[b*32u + byteIdx];
+        acc += d*hi*xv[b*32u + byteIdx + 16u];
+      }
+    }
+  }
+  outv[pc.row0 + row]=acc;
+}

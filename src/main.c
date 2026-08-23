@@ -91,6 +91,7 @@ static void usage(const char *a0){
     "      --repeat-penalty R  (def 1.1)\n"
     "      --tokens a,b  ids directos\n"
     "      --bos         prepend BOS\n"
+    "      --gpu         dual band CPU+GPU del head (requiere Vulkan estable)\n"
     "  %s synth  <out.g2bx>\n"
     "  %s bench  <model> [-n N] [--prefill N]\n"
     "  %s chat   <model> [-n N] [-t TEMP] [--no-think]\n"
@@ -374,6 +375,7 @@ static int cmd_run(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
+  int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   u64 seed=0; int ndrop=0;
   i32 prompt[1024]; i32 np=0;
@@ -393,6 +395,7 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
+    else if(!strcmp(argv[i],"--gpu")) gpu=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
       for(tok=strtok(s,","); tok&&np<1024; tok=strtok(NULL,",")) prompt[np++]=atoi(tok);
@@ -402,10 +405,12 @@ static int cmd_run(int argc, char **argv){
     }
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
-  if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
+  if(ndrop>0 && m.tok){
+    i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
     if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
   if(text[0] && m.tok){
@@ -554,6 +559,7 @@ static int cmd_chat(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
+  int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
@@ -572,8 +578,10 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
@@ -695,6 +703,7 @@ static double now_sec(void){
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
+  int gpu=0;
   i32 prefill_n=0; u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
@@ -708,8 +717,10 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(argv[2],&m)) return 1;
+  if(gpu && !vk_dual_start(&m,argv[2])) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
@@ -763,6 +774,7 @@ static int cmd_bench(int argc, char **argv){
 int main(int argc, char **argv){
   fprintf(stderr,"[main] arranque\n");
   if(argc<2){ usage(argv[0]); return 1; }
+  if(!strcmp(argv[1],"--gpu-worker")) return vk_worker_main(argc,argv);
   if(!strcmp(argv[1],"pack"))  return cmd_pack(argc,argv);
   if(!strcmp(argv[1],"info"))  return cmd_info(argc,argv);
   if(!strcmp(argv[1],"run"))   return cmd_run(argc,argv);
