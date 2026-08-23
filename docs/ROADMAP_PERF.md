@@ -29,3 +29,16 @@ d) Preconvertir escalas fp16 a F32 scratch por llamada.
   con mispredicts en B=1. El beneficio ya lo captura --prune offline.
 
 Medicion de afinidad: 2 fisicos=13.4 vs 4 HT=14.0 -> mantener 4 hilos.
+# Hallazgo critico: CANAL UNICO
+Win32_PhysicalMemory = ChannelB-DIMM0 8GB unicamente -> single channel.
+Anadir SO-DIMM DDR3L-1600 en ChannelA => dual channel (~19-20 GB/s reales)
+=> TODOS los modelos x2 velocidad instantanea sin tocar codigo.
+(LFM2.5 q4s: 15.9 -> ~30 tok/s; Qwen2.5-3B: 4.3 -> ~8.5)
+
+## Roadmap software restante (ordenado)
+1. matmul_q4_0s_b (batched streamea B veces hoy - bug en dispatch l2:792)
+2. Especulacion n-gram + verificacion batcheada: 1.3-1.85x (alpha=0.35-0.5)
+   - LFM2: checkpoint conv_state antes del draft, rollback KV en rechazo
+3. Shortlist head 2 niveles (top-4096 tokens = 85-92% emisiones): 8-11%
+4. Large pages para pesos (MEM_LARGE_PAGES + SeLockMemoryPrivilege): 2-5%
+5. INT8 activations en todos los kernels: habilita k=6-8 especulativo
