@@ -6,6 +6,7 @@
 static int parse_name(const char *name, u8 *role, u16 *layer){
   *layer=0xFFFF;
   if(!strcmp(name,"token_embd.weight")){ *role=R_TOK_EMBD; return 0; }
+  if(!strcmp(name,"token_embd_norm.weight")){ *role=R_EMBD_NORM; return 0; }
   if(!strcmp(name,"output_norm.weight")){ *role=R_OUT_NORM; return 0; }
   if(!strcmp(name,"output.weight")){ *role=R_OUTPUT; return 0; }
   if(strncmp(name,"blk.",4)) return -1;
@@ -27,6 +28,9 @@ static int parse_name(const char *name, u8 *role, u16 *layer){
   if(!strcmp(p,"ffn_gate.weight")){ *role=R_FFN_GATE; return 0; }
   if(!strcmp(p,"ffn_up.weight")){ *role=R_FFN_UP; return 0; }
   if(!strcmp(p,"ffn_down.weight")){ *role=R_FFN_DOWN; return 0; }
+  if(!strcmp(p,"shortconv.conv.weight")){ *role=R_CONV_W; return 0; }
+  if(!strcmp(p,"shortconv.in_proj.weight")){ *role=R_CONV_IN; return 0; }
+  if(!strcmp(p,"shortconv.out_proj.weight")){ *role=R_CONV_OUT; return 0; }
   return -1;
 }
 static i64 meta_pref(GGUF *g, const char *arch, const char *suf){
@@ -60,7 +64,9 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   /* Arquitecturas conocidas LLM/Qwen; cualquier otra (p.ej. dflash) se deduce por heurística */
   const int is_llama=!strcmp(aname,"llama");
   const int is_qwen =!strcmp(aname,"qwen2")||!strcmp(aname,"qwen2moe")||!strcmp(aname,"qwen3");
+  const int is_lfm2 =!strncmp(aname,"lfm2",4);
   if(is_llama) *arch=ARCH_LLAMA;
+  else if(is_lfm2) *arch=ARCH_LFM2;
   else {
     *arch = is_qwen ? ARCH_QWEN2 : ARCH_QWEN3; /* custom -> NEOX/Qwen por defecto */
     if(!is_qwen && aname[0]){
@@ -83,6 +89,17 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   if(c->eps==0.f) c->eps=1e-6f;
   c->head_dim   =(i32)meta_pref(g,p,"attention.key_length");
   if(!c->head_dim && c->n_heads) c->head_dim=c->dim/c->n_heads;
+  /* LFM2: head_count_kv es array por capa (0=conv); inferir de attn_k dims */
+  if(!c->n_kv_heads || *arch==ARCH_LFM2){
+    for(u64 i=0;i<g->n_tensors;i++){
+      const char *nm=g->t[i].name;
+      size_t l=strlen(nm);
+      if(l>=13 && !strcmp(nm+l-13,"attn_k.weight") && g->t[i].n_dims==2 && c->head_dim){
+        u64 kvdim=g->t[i].dims[1]>g->t[i].dims[0]?g->t[i].dims[0]:g->t[i].dims[1];
+        if(kvdim && kvdim% (u64)c->head_dim==0){ c->n_kv_heads=(i32)(kvdim/(u64)c->head_dim); break; }
+      }
+    }
+  }
   c->rope_theta =meta_preff(g,p,"rope.freq_base");
   if(c->rope_theta==0.f) c->rope_theta=(*arch==ARCH_LLAMA)?10000.f:1000000.f;
   if(!c->n_kv_heads) c->n_kv_heads=c->n_heads;
@@ -343,7 +360,7 @@ int g2bx_info(const char *path){
   if(!sl || fread(sl,sizeof(Slot),ns,f)!=ns){ free(sl); fclose(f); return -1; }
   static const char *rn[]={"tok_embd","out_norm","output","attn_norm","attn_q","attn_k","attn_v",
     "attn_o","attn_q_norm","attn_k_norm","ffn_norm","ffn_gate","ffn_up","ffn_down",
-    "attn_q_bias","attn_k_bias","attn_v_bias"};
+    "attn_q_bias","attn_k_bias","attn_v_bias","embd_norm","conv_w","conv_in","conv_out"};
   u64 total=0; for(u32 i=0;i<ns;i++){ const char *r=sl[i].role<R_COUNT?rn[sl[i].role]:"?"; if(sl[i].layer==0xFFFF) printf("  [%u] %-12s global type=%u %u B off=%llu\n",i,r,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); else printf("  [%u] %-12s L%-4u type=%u %u B off=%llu\n",i,r,sl[i].layer,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); total+=sl[i].nbytes; }
   printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); free(sl); fclose(f); return 0;
 }

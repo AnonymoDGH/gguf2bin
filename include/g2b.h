@@ -19,13 +19,17 @@ enum {
   T_Q8_0=8, T_Q8_1=9, T_Q2_K=10, T_Q3_K=11, T_Q4_K=12, T_Q5_K=13, T_Q6_K=14, T_Q8_K=15,
   T_IQ4_NL=16, T_IQ4_XS=17, T_IQ3_XXS=18, T_IQ2_XXS=19, T_IQ2_XS=20, T_IQ3_S=21, T_IQ2_S=22, T_IQ1_S=23, T_IQ1_M=24
 };
-enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2 };
+enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };
 enum {
   R_TOK_EMBD=0, R_OUT_NORM, R_OUTPUT,
   R_ATTN_NORM, R_ATTN_Q, R_ATTN_K, R_ATTN_V, R_ATTN_O, R_ATTN_Q_NORM, R_ATTN_K_NORM,
   R_FFN_NORM, R_FFN_GATE, R_FFN_UP, R_FFN_DOWN,
   R_ATTN_Q_BIAS, R_ATTN_K_BIAS, R_ATTN_V_BIAS, /* Qwen2.5 attention biases (añadidos al final: no rompe roles existentes) */
+  R_EMBD_NORM,   /* LFM2: norm tras el embedding */
+  R_CONV_W,      /* LFM2 shortconv: peso depthwise [kernel,channels] F32 */
+  R_CONV_IN,     /* LFM2 shortconv: proyección entrada (3*dim) */
+  R_CONV_OUT,    /* LFM2 shortconv: proyección salida */
   R_COUNT
 };
 
@@ -106,6 +110,7 @@ typedef struct {
   u8  *kcq, *vcq;             /* KV cuantizado Q8_0 (cuando F_KV_Q8) */
   i32 ctx;                    /* contexto efectivo en runtime (<= c.seq_len) */
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
+  f32 *conv_state;            /* LFM2: estado conv por capa [L][K-1][dim] */
   /* recolección de estadísticas FFN para poda calibrada */
   u8 collect_stats;
   f32 *ffn_stats;             /* [n_layers x hidden]: Σ|silu(g)·u| por neurona */

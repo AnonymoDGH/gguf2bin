@@ -498,6 +498,10 @@ static int cmd_ppl(int argc, char **argv){
   text[len]=0;
   i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
   free(text);
+  if(m.tok->bos>=0 && !(nt>0 && ids[0]==m.tok->bos)){
+    i32 *tmp=malloc((size_t)(nt+1)*sizeof(i32));
+    if(tmp){ tmp[0]=m.tok->bos; memcpy(tmp+1,ids,(size_t)nt*sizeof(i32)); free(ids); ids=tmp; nt++; }
+  }
   if(nt>maxtok) nt=maxtok;
   if(nt<2){ fprintf(stderr,"ppl: <2 tokens\n"); free(ids); model_free(&m); return 1; }
   fprintf(stderr,"ppl: %d tokens, ctx=%d\n",nt,m.ctx);
