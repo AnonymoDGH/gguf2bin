@@ -52,3 +52,12 @@ unpack); (3) pipeline por bloque LFM2 (conv/att), sincronizando x en VRAM;
 Riesgos: driver AMD 2022 GCN1 (soporte minimo), validar con triangulo de
 prueba antes de portar los 6 kernels. Estimacion honesta: 2-3 sesiones.
 Alternativa ya existente hoy: llama.cpp -DGGML_VULKAN=ON con el GGUF original.
+
+## Diagnostico Vulkan (fase 1 abortada)
+vkCreateInstance SE CUELGA en este sistema (API 1.0 y 1.1): el cargador ICD de
+AMD/driver-2022 sobre portatil hibrido Intel+R5M330 no completa la enumeracion.
+Verificado con log por etapas: dll carga OK, punteros OK, instancia = hang.
+Rutas: actualizar driver AMD/Radeon Settings; probar llama.cpp-Vulkan (mismo
+riesgo); o hardware: SO-DIMM canal A (x2 garantizado, sin driver que cuelgue).
+El codigo de sonda queda en src/l7_vulkan.c + comando vkinfo para retestear
+tras actualizar drivers.

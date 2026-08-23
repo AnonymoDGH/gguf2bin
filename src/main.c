@@ -761,6 +761,7 @@ static int cmd_bench(int argc, char **argv){
 }
 
 int main(int argc, char **argv){
+  fprintf(stderr,"[main] arranque\n");
   if(argc<2){ usage(argv[0]); return 1; }
   if(!strcmp(argv[1],"pack"))  return cmd_pack(argc,argv);
   if(!strcmp(argv[1],"info"))  return cmd_info(argc,argv);
@@ -769,5 +770,6 @@ int main(int argc, char **argv){
   if(!strcmp(argv[1],"bench")) return cmd_bench(argc,argv);
   if(!strcmp(argv[1],"chat"))  return cmd_chat(argc,argv);
   if(!strcmp(argv[1],"ppl"))   return cmd_ppl(argc,argv);
+  if(!strcmp(argv[1],"vkinfo")){ extern int vk_init(void); int r=vk_init(); return r?1:0; }
   usage(argv[0]); return 1;
 }
