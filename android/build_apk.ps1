@@ -20,7 +20,7 @@ if (!(Test-Path $ks)) {
 $cc = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android24-clang.cmd"
 $srcs = @("$root\..\src\l1_gguf.c","$root\..\src\l2_codec.c","$root\..\src\l3_math.c",
           "$root\..\src\l4_gbin.c","$root\..\src\l5_model.c","$root\..\src\l6_token.c",
-          "$root\jni\g2b_jni.c")
+          "$root\jni\g2b_jni.c","$root\jni\vk_stub.c")
 & $cc -O3 -ffast-math -fPIC -shared -o "$out\libgguf2bin.so" `
   -I"$root\..\include" @srcs -lm -fopenmp -static-openmp
 if ($LASTEXITCODE) { throw "fallo compilación nativa" }
