@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:padding="20dp">
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Ajustes de generación" android:textSize="22sp" android:textStyle="bold"
+        android:paddingBottom="18dp"/>
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Contexto (tokens, menos = menos RAM)"/>
+    <EditText android:id="@+id/ctx" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="number" android:text="2048"/>
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Tokens máximos por respuesta"/>
+    <EditText android:id="@+id/maxtok" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="number" android:text="256"/>
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Temperatura (0 = determinista)"/>
+    <EditText android:id="@+id/temp" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="numberDecimal" android:text="0.7"/>
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Top-K (40 recomendado)"/>
+    <EditText android:id="@+id/topk" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="number" android:text="40"/>
+
+    <Button android:id="@+id/save" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="Guardar"
+        android:backgroundTint="#7AA2F7" android:textColor="#0B0E14"
+        android:layout_marginTop="12dp"/>
+</LinearLayout>

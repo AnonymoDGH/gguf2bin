@@ -26,6 +26,7 @@ $srcs = @("$root\..\src\l1_gguf.c","$root\..\src\l2_codec.c","$root\..\src\l3_ma
 if ($LASTEXITCODE) { throw "fallo compilación nativa" }
 
 # 2) recursos + manifest -> apk base (+ R.java)
+Remove-Item "$out\res_flat" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$out\res_flat" | Out-Null
 & "$bt\aapt2.exe" compile --dir "$root\res" -o "$out\res_flat"
 if ($LASTEXITCODE) { throw "fallo aapt2 compile" }
@@ -35,7 +36,7 @@ if ($LASTEXITCODE) { throw "fallo aapt2 link" }
 
 # 3) java -> dex
 New-Item -ItemType Directory -Force "$out\classes" | Out-Null
-javac --release 8 -cp $plat -d "$out\classes" (Get-ChildItem "$root\java" -Filter *.java -Recurse).FullName
+javac -encoding UTF-8 --release 8 -cp $plat -d "$out\classes" (Get-ChildItem "$root\java" -Filter *.java -Recurse).FullName
 if ($LASTEXITCODE) { throw "fallo javac" }
 & "$bt\d8.bat" --release --lib $plat --output "$out" (Get-ChildItem "$out\classes" -Filter *.class -Recurse).FullName
 if ($LASTEXITCODE) { throw "fallo d8" }

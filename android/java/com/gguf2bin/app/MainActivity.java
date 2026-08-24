@@ -1,13 +1,14 @@
 package com.gguf2bin.app;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
-import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
@@ -21,9 +22,10 @@ public class MainActivity extends Activity {
     private EditText urlBox;
     private Button downloadBtn;
     private TextView status;
+    private ProgressBar progress;
     private ListView list;
     private ArrayAdapter<String> adapter;
-    private ArrayList<String> names = new ArrayList<>();
+    private final ArrayList<String> names = new ArrayList<>();
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -31,67 +33,91 @@ public class MainActivity extends Activity {
         urlBox = findViewById(R.id.url);
         downloadBtn = findViewById(R.id.download);
         status = findViewById(R.id.status);
+        progress = findViewById(R.id.dl_progress);
         list = findViewById(R.id.list);
+
+        findViewById(R.id.settings).setOnClickListener(v ->
+            startActivity(new Intent(this, SettingsActivity.class)));
+
         refresh();
         adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, names);
         list.setAdapter(adapter);
-        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            public void onItemClick(AdapterView<?> p, View v, int pos, long id) {
-                File f = modelsDir(names.get(pos));
-                android.content.Intent it = new android.content.Intent(MainActivity.this, ChatActivity.class);
-                it.putExtra("model", f.getAbsolutePath());
-                startActivity(it);
-            }
+        list.setOnItemClickListener((p, v, pos, id) -> {
+            Intent it = new Intent(this, ChatActivity.class);
+            it.putExtra("model", modelsDir(names.get(pos)).getAbsolutePath());
+            startActivity(it);
         });
-        downloadBtn.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) { download(); }
+        list.setOnItemLongClickListener((p, v, pos, id) -> {
+            File f = modelsDir(names.get(pos));
+            new android.app.AlertDialog.Builder(this)
+                .setTitle(f.getName())
+                .setMessage(String.format("Eliminar? (%.0f MB)", f.length() / 1048576.0))
+                .setPositiveButton("Eliminar", (d, w) -> { f.delete(); refresh(); })
+                .setNegativeButton("Cancelar", null).show();
+            return true;
         });
+        downloadBtn.setOnClickListener(v -> download());
     }
+
+    @Override protected void onResume() { super.onResume(); refresh(); }
 
     private File modelsDir(String name) { return new File(getFilesDir(), name); }
 
     private void refresh() {
         names.clear();
         File[] fs = getFilesDir().listFiles();
-        if (fs != null) for (File f : fs) if (f.getName().endsWith(".g2bx")) names.add(f.getName());
+        if (fs != null) for (File f : fs)
+            if (f.getName().endsWith(".g2bx"))
+                names.add(String.format("%s\n%.0f MB", f.getName(), f.length() / 1048576.0));
         if (adapter != null) adapter.notifyDataSetChanged();
     }
 
     private void download() {
-        final String u = urlBox.getText().toString().trim();
-        if (!u.startsWith("http")) { Toast.makeText(this, "URL inválida", 1).show(); return; }
+        String u = urlBox.getText().toString().trim();
+        if (!u.startsWith("http")) { Toast.makeText(this, "URL invalida", 1).show(); return; }
         String fname = u.substring(u.lastIndexOf('/') + 1);
+        if (fname.isEmpty()) fname = "modelo.g2bx";
         if (!fname.endsWith(".g2bx")) fname += ".g2bx";
-        final File dst = modelsDir(fname);
+        File dst = modelsDir(fname);
         downloadBtn.setEnabled(false);
-        status.setText("Descargando…");
-        new Thread(new Runnable() { public void run() {
+        progress.setIndeterminate(true);
+        progress.setVisibility(View.VISIBLE);
+        status.setText("Conectando...");
+        new Thread(() -> {
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
-                c.setFollowRedirects(true);
+                c.setInstanceFollowRedirects(true);
                 c.connect();
                 long total = c.getContentLength();
                 InputStream in = c.getInputStream();
                 FileOutputStream out = new FileOutputStream(dst);
                 byte[] buf = new byte[1 << 16];
-                long got = 0; int r;
+                final long[] got = {0}; int r;
+                runOnUiThread(() -> { progress.setIndeterminate(total <= 0); });
                 while ((r = in.read(buf)) > 0) {
-                    out.write(buf, 0, r); got += r;
-                    final String s = total > 0
-                        ? String.format("Descargando… %.1f / %.1f MB", got / 1048576.0, total / 1048576.0)
-                        : String.format("Descargando… %.1f MB", got / 1048576.0);
-                    runOnUiThread(new Runnable() { public void run() { status.setText(s); } });
+                    out.write(buf, 0, r); got[0] += r;
+                    final int pct = total > 0 ? (int)(got[0] * 100 / total) : 0;
+                    runOnUiThread(() -> {
+                        if (total > 0) {
+                            progress.setProgress(pct);
+                            status.setText(String.format("%d%% · %.1f/%.1f MB", pct,
+                                got[0] / 1048576.0, total / 1048576.0));
+                        } else
+                            status.setText(String.format("%.1f MB", got[0] / 1048576.0));
+                    });
                 }
                 out.close(); in.close();
-                runOnUiThread(new Runnable() { public void run() {
-                    status.setText("Listo"); downloadBtn.setEnabled(true); refresh();
-                }});
-            } catch (final Exception e) {
+                runOnUiThread(() -> {
+                    status.setText("Descargado"); progress.setVisibility(View.GONE);
+                    downloadBtn.setEnabled(true); refresh();
+                });
+            } catch (Exception e) {
                 dst.delete();
-                runOnUiThread(new Runnable() { public void run() {
-                    status.setText("Error: " + e.getMessage()); downloadBtn.setEnabled(true);
-                }});
+                runOnUiThread(() -> {
+                    status.setText("Error: " + e.getMessage());
+                    progress.setVisibility(View.GONE); downloadBtn.setEnabled(true);
+                });
             }
-        }}).start();
+        }).start();
     }
 }

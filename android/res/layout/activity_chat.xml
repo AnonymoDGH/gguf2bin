@@ -1,15 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:orientation="vertical" android:layout_width="match_parent"
-    android:layout_height="match_parent" android:padding="8dp">
+    android:orientation="vertical"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+
+    <LinearLayout android:orientation="horizontal" android:gravity="center_vertical"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:padding="14dp" android:background="#151923">
+        <Button android:id="@+id/back" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="←"
+            android:backgroundTint="#151923" android:textColor="#7AA2F7"/>
+        <TextView android:id="@+id/title" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content" android:textSize="16sp" android:textStyle="bold"
+            android:singleLine="true" android:ellipsize="end"/>
+    </LinearLayout>
+
     <ScrollView android:id="@+id/scroll" android:layout_width="match_parent"
-        android:layout_height="0dp" android:layout_weight="1">
+        android:layout_height="0dp" android:layout_weight="1"
+        android:padding="14dp" android:fillViewport="true">
         <TextView android:id="@+id/out" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:text="Cargando modelo…"
-            android:textIsSelectable="true"/>
+            android:layout_height="wrap_content" android:textSize="15sp"
+            android:lineSpacingMultiplier="1.35" android:textIsSelectable="true"/>
     </ScrollView>
-    <EditText android:id="@+id/input" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:hint="Mensaje…"/>
-    <Button android:id="@+id/send" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:text="Enviar"/>
+
+    <ProgressBar android:id="@+id/busy" style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:indeterminate="true" android:visibility="gone"/>
+
+    <LinearLayout android:orientation="horizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:background="#151923" android:padding="8dp" android:gravity="bottom">
+        <EditText android:id="@+id/input" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="wrap_content" android:hint="Escribe un mensaje…"
+            android:maxLines="4"/>
+        <Button android:id="@+id/send" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="Enviar"
+            android:backgroundTint="#7AA2F7" android:textColor="#0B0E14"/>
+    </LinearLayout>
 </LinearLayout>

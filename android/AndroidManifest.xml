@@ -4,13 +4,16 @@
     android:versionCode="1" android:versionName="1.0">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34"/>
-    <application android:label="gguf2bin" android:usesCleartextTraffic="true">
+    <application android:label="gguf2bin" android:usesCleartextTraffic="true"
+        android:theme="@style/AppTheme">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <activity android:name=".ChatActivity" android:exported="false"/>
+        <activity android:name=".ChatActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize"/>
+        <activity android:name=".SettingsActivity" android:exported="false"/>
     </application>
 </manifest>

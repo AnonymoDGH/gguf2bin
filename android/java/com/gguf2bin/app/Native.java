@@ -7,5 +7,7 @@ public class Native {
 
     public static native long loadModel(String path, int ctx);
     public static native void freeModel(long ptr);
-    public static native String generate(long ptr, String prompt, int maxTokens, float temp, TokenSink sink);
+    public static native void setThreads(int n);
+    public static native String generate(long ptr, String prompt, int maxTokens,
+                                         float temp, int topK, TokenSink sink);
 }
