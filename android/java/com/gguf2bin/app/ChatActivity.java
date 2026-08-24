@@ -11,6 +11,7 @@ import android.widget.EditText;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import java.io.File;
 
 public class ChatActivity extends Activity {
@@ -22,8 +23,9 @@ public class ChatActivity extends Activity {
     private ProgressBar busy;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final StringBuilder history = new StringBuilder();
-    private int ctx = 2048, maxTok = 256, topK = 40, threads = 0;
+    private int ctx = 2048, maxTok = 256, topK = 40;
     private float temp = 0.7f;
+    private boolean userScrolling = false;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -34,25 +36,42 @@ public class ChatActivity extends Activity {
         send = findViewById(R.id.send);
         busy = findViewById(R.id.busy);
         findViewById(R.id.back).setOnClickListener(v -> finish());
+        send.setEnabled(false);
 
         SharedPreferences sp = getSharedPreferences("settings", MODE_PRIVATE);
         ctx    = sp.getInt("ctx", 2048);
         maxTok = sp.getInt("maxtok", 256);
         temp   = sp.getFloat("temp", 0.7f);
         topK   = sp.getInt("topk", 40);
-        threads= sp.getInt("threads", 0);
+        if (scroll.getViewTreeObserver() != null) {
+            scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
+                View child = scroll.getChildAt(0);
+                if (child == null) return;
+                int diff = child.getBottom() - (scroll.getHeight() + scroll.getScrollY());
+                userScrolling = diff > 120;
+            });
+        }
 
         String path = getIntent().getStringExtra("model");
+        if (path == null || !(new File(path).exists())) {
+            Toast.makeText(this, "Modelo no encontrado", 1).show();
+            finish(); return;
+        }
         ((TextView) findViewById(R.id.title)).setText(new File(path).getName());
-        Native.setThreads(threads);
+        out.setText("Cargando modelo...");
 
         new Thread(() -> {
+            long t0 = System.currentTimeMillis();
             final long ptr = Native.loadModel(path, ctx);
             runOnUiThread(() -> {
-                if (ptr == 0) { finish(); return; }
+                if (ptr == 0) {
+                    Toast.makeText(this, "No se pudo cargar el modelo", 1).show();
+                    out.setText("Error al cargar el modelo.");
+                    return;
+                }
                 model = ptr;
-                out.setText(String.format(
-                    "✓ Modelo cargado · ctx=%d\nEscribe tu mensaje.", ctx));
+                long ms = System.currentTimeMillis() - t0;
+                out.setText(String.format("Modelo cargado en %.1fs  ·  ctx=%d\nEscribe tu mensaje abajo.", ms/1000.0, ctx));
                 send.setEnabled(true);
             });
         }).start();
@@ -65,31 +84,28 @@ public class ChatActivity extends Activity {
             history.append("\nUsuario: ").append(q).append("\nAsistente: ");
             trimHistory();
             ui.post(() -> {
-                out.append("\n\n\u25AA Tú: " + q + "\n\u25AA Bot: ");
-                scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+                out.append("\n\n\u25AA Tu: " + q + "\n\u25AA Bot: ");
+                autoScroll();
             });
             new Thread(() -> {
-                long t0 = System.currentTimeMillis();
                 final String reply = Native.generate(model, history.toString(), maxTok, temp, topK,
-                    t -> ui.post(() -> {
-                        out.append(t);
-                        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
-                    }));
+                    t -> ui.post(() -> { out.append(t); autoScroll(); }));
                 if (reply != null) history.append(reply);
-                final long ms = System.currentTimeMillis() - t0;
                 ui.post(() -> {
-                    send.setEnabled(true); input.setEnabled(false ? true : true);
-                    input.setEnabled(true); busy.setVisibility(View.GONE);
-                    out.append(String.format("\n\n[%d tok en %.1fs]", maxTok, ms / 1000.0));
-                    scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+                    send.setEnabled(true); input.setEnabled(true); busy.setVisibility(View.GONE);
+                    autoScroll();
                 });
             }).start();
         });
     }
 
-    /* evita desbordar el contexto: recorta el historial a ~3/4 del mismo */
+    private void autoScroll() {
+        if (userScrolling) return;
+        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+    }
+
     private void trimHistory() {
-        int approxTokens = history.length() / 3;   /* ~3 caracteres por token */
+        int approxTokens = history.length() / 3;
         int limit = ctx * 3 / 4;
         while (approxTokens > limit && history.length() > 256) {
             int cut = history.indexOf("\nUsuario:", 16);
