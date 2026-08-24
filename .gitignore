@@ -23,3 +23,17 @@ kvtest.exe
 *.user
 Thumbs.db
 .DS_Store
+
+android/build/
+android/java/com/gguf2bin/app/R.java
+gguf2bin.apk
+gguf2bin.exe
+vk.log
+_b*.txt
+_dt.out
+_n.err
+_v.err
+_vk.err
+_vk.out
+_screen.png
+_shot.ps1
