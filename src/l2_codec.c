@@ -988,6 +988,40 @@ void matmul_q5_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
       out[(size_t)t*d+i]=q5_row_dot(row,qa+(size_t)t*n,scl+(size_t)t*(n/32),sum16+(size_t)t*(n/16),n);
   }
 }
+/* ── IQ1_S fused: 50 bytes per 256, grid 2048*8 + delta ── */
+static f32 iq1_s_row_dot(const u8 *row, const u8 *act, const f32 *scl, i32 n){
+  int nb256=n/256;
+  f32 acc=0.f;
+  for(int blk=0; blk<nb256; blk++){
+    const u8 *b = row + blk*50;
+    f32 d = half_to_float(*(const u16*)b);
+    const u8 *qs = b+2;
+    const u16 *qh = (const u16*)(b+34);
+    for(int ib=0; ib<8; ib++){
+      f32 dl = d * (2.f*((qh[ib]>>12)&7)+1.f);
+      f32 delta = (qh[ib]&0x8000)? -IQ1S_DELTA : IQ1S_DELTA;
+      f32 s = scl[blk*8 + ib];
+      const i8 *xa = (const i8*)(act + (blk*8+ib)*32);
+      for(int l=0;l<4;l++){
+        int idx = qs[l] | (((qh[ib] >> (3*l)) &7)<<8);
+        const i8 *grid = (const i8*)iq1s_grid + idx*8;
+        for(int j=0;j<8;j++) acc += dl * s * (grid[j]+delta) * (f32)xa[l*8+j];
+      }
+      qs+=4;
+    }
+  }
+  return acc;
+}
+void matmul_iq1_s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
+  if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
+  u8 *qa=g_q4act; f32 *scl=g_q4scl;
+  for(i32 t=0;t<B;t++) q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),NULL);
+  #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    const u8 *row=w+(size_t)i*(size_t)(n/256)*50;
+    for(i32 t=0;t<B;t++) out[(size_t)t*d+i]=iq1_s_row_dot(row, qa+(size_t)t*n, scl+(size_t)t*(n/32), n);
+  }
+}
 
 #else
 void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
@@ -1092,6 +1126,7 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,B); return; }
   if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,B); return; }
   if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,B); return; }
+  // if(type==T_IQ1_S){ matmul_iq1_s_b(out,x,w,n,d,B); return; } // disabled: needs AVX opt
 #endif
   if(type==T_F32){
     #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
@@ -1142,6 +1177,7 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,1); return; }
   if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,1); return; }
   if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,1); return; }
+  // if(type==T_IQ1_S){ matmul_iq1_s_b(out,x,w,n,d,1); return; }
 #endif
   if(type==T_F32){ matmul(out,x,(f32*)w,n,d); return; }
   /* Fallback para tipos no fusionados (Q4_1, etc.): per-thread alloc, no per-row */
