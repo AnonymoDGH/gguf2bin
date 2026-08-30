@@ -10,6 +10,27 @@ void matmul_q4_0s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
 void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
 /* Threshold: skip OpenMP for small matmuls where fork/join overhead dominates. */
 #define OMP_MM_MIN 131072 /* ~512*256 elements — below this, single-thread wins */
+#if defined(_OPENMP)
+#include <omp.h>
+static f32 *g_fallback_buf[64] = {0};
+static size_t g_fallback_cap[64] = {0};
+static inline f32* fallback_buf(size_t n){
+  int tid = omp_get_thread_num();
+  if(tid<0||tid>=64) tid=0;
+  if(g_fallback_cap[tid] < n){
+    free(g_fallback_buf[tid]);
+    g_fallback_buf[tid]=(f32*)malloc(n*sizeof(f32));
+    g_fallback_cap[tid]= g_fallback_buf[tid] ? n : 0;
+  }
+  return g_fallback_buf[tid];
+}
+#else
+static f32 *g_fallback_buf1=NULL; static size_t g_fallback_cap1=0;
+static inline f32* fallback_buf(size_t n){
+  if(g_fallback_cap1 < n){ free(g_fallback_buf1); g_fallback_buf1=(f32*)malloc(n*sizeof(f32)); g_fallback_cap1=g_fallback_buf1?n:0; }
+  return g_fallback_buf1;
+}
+#endif
 u64 ggml_block_size(u32 type){
   switch(type){
     case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1:
@@ -1089,7 +1110,7 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   int use_omp = ((i64)n*d*B > OMP_MM_MIN);
   #pragma omp parallel if(use_omp)
   {
-    f32 *tmp = (f32*)malloc((size_t)n * sizeof(f32));
+    f32 *tmp = fallback_buf((size_t)n);
     if(tmp){
       #pragma omp for schedule(static)
       for(i32 i=0;i<d;i++){
@@ -1100,7 +1121,6 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
           out[(size_t)t*d+i]=s;
         }
       }
-      free(tmp);
     } else {
       #pragma omp for schedule(static)
       for(i32 i=0;i<d*B;i++) out[i]=0.f;
@@ -1129,7 +1149,7 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   int use_omp = ((i64)n*d > OMP_MM_MIN);
   #pragma omp parallel if(use_omp)
   {
-    f32 *tmp = (f32*)malloc((size_t)n * sizeof(f32));
+    f32 *tmp = fallback_buf((size_t)n);
     if(tmp){
       #pragma omp for schedule(static)
       for(i32 i=0;i<d;i++){
@@ -1137,7 +1157,6 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
         f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
         out[i]=s;
       }
-      free(tmp);
     } else {
       #pragma omp for schedule(static)
       for(i32 i=0;i<d;i++) out[i]=0.f;

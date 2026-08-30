@@ -19,12 +19,12 @@ Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 | Model | Weights (mmap) | Runtime RAM | decode | prefill |
 |---|---|---|---|---|
 | **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** | 7.8 |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **38.1** (`--mv 0.5`) / **39.2** (`--mv 1.0`) | **47.9** |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **40.1** (`--mv 0.5`) / 39.2 (`--mv 1.0`) | **47.9** |
 | **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
 | Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-Measured 2026-08-30/31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` skips ~50% FFN/SSM via Swapeculative MV (hash + 2-bit predictor) → 25→38 tok/s (+52%) with quality tradeoff, `--mv 1.0` → 39.2 tok/s. At ~25 tok/s decode is pinned to DDR3L ~9 GB/s; batched prefill hits compute ~27 GMAC/s.
+Measured 2026-08-31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` Swapeculative + fallback TLS buf → 25.0→40.1 tok/s (**+60%**) with tradeoff, `--mv 1.0` → 39.2. At ~25 tok/s decode pinned to DDR3L ~9 GB/s; prefill hits compute ~27 GMAC/s. Fallback IQ now uses thread-local buf (no malloc per row) → qwen38 benefits even at `--mv 0`.
 
 ## 🚀 Quick start
 
