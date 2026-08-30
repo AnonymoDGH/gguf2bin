@@ -22,7 +22,8 @@ enum {
   T_IQ2_XXS=16, T_IQ2_XS=17, T_IQ3_XXS=18, T_IQ1_S=19, T_IQ4_NL=20,
   T_IQ3_S=21, T_IQ2_S=22, T_IQ4_XS=23, T_F64=28,
   T_IQ1_M=29, T_BF16=30,
-  T_Q4_0S=25 /* interno: reutiliza un ID que GGUF no usa en pesos (compat con g2bx antiguos) */
+  T_Q4_0S=25 /* interno: reutiliza un ID que GGUF no usa en pesos (compat con g2bx antiguos) */,
+  T_Q4_0S_PSY=26 /* psicoacústico: 2 escalas por 256 (baja/alta freq) 132B */
 };
 enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3, ARCH_QWEN35=4 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };
@@ -106,6 +107,7 @@ int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, flo
 int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
                            int downq4, float prune, const f32 *calib);
 void g2bx_set_q4s(int v);
+void g2bx_set_q4s_psy(int v);
 int vk_init(void); void vkinfo_cmd(void); int vk_device_ok(void);
 int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(void); void vk_head_run(const f32 *x, f32 *logits); int vk_head_ready(void);
 int g2bx_info(const char *path);

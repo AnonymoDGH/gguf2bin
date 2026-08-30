@@ -35,7 +35,7 @@ u64 ggml_block_size(u32 type){
   switch(type){
     case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1:
     case T_Q8_0: case T_Q8_1: return 32;
-    case T_Q4_0S: return 256;
+    case T_Q4_0S: case T_Q4_0S_PSY: return 256;
     case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K:
     case T_Q6_K: case T_Q8_K: return 256;
     /* i-quants: superbloques de 256 (IQ4_NL usa 32) */
@@ -56,6 +56,7 @@ u64 ggml_type_bytes(u32 type){
     case T_Q8_0: return 34;
     case T_Q8_1: return 36;
     case T_Q4_0S: return 130;
+    case T_Q4_0S_PSY: return 132;
     case T_Q2_K: return 84;
     case T_Q3_K: return 110;
     case T_Q4_K: return 144;
@@ -494,6 +495,22 @@ void gguf_dequant(u32 type, u8 *src, f32 *out, u64 ne){
         }
       }
     } break;
+    case T_Q4_0S_PSY: { /* 2 escalas por 256: baja 128 + alta 128 */
+      u64 nsb=ne/256;
+      for(u64 sb=0;sb<nsb;sb++){
+        const u8 *b_=src+sb*132;
+        f32 d0=half_to_float(*(const u16*)(b_+0));
+        f32 d1=half_to_float(*(const u16*)(b_+2));
+        for(int g2=0;g2<8;g2++){
+          f32 dsc = g2<4 ? d0 : d1;
+          const u8 *nb2=b_+4+g2*16;
+          for(int j=0;j<16;j++){
+            out[sb*256+g2*32+j]     = dsc*((nb2[j]&0xF)-8);
+            out[sb*256+g2*32+16+j]  = dsc*((nb2[j]>>4)-8);
+          }
+        }
+      }
+    } break;
     case T_Q8_0: deq_q8_0(src,out,ne); break;
     case T_Q2_K: deq_q2_K(src,out,ne); break;
     case T_Q3_K: deq_q3_K(src,out,ne); break;
@@ -843,6 +860,66 @@ void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
     }
   }
 }
+/* Q4_0S_PSY: 2 escalas por 256 (132B) — baja 128 + alta 128 */
+void matmul_q4_0s_psy(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
+  i32 nb=n/32, nsb=n/256;
+  const __m128i mask0F=_mm_set1_epi8(0x0F);
+  const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
+  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
+  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
+  q4_quant_act(x,n,q8,q8d,NULL);
+  #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    const u8 *row=w+(size_t)i*(size_t)nsb*132;
+    __m256 acc=_mm256_setzero_ps();
+    for(i32 b=0;b<nb;b+=8){
+      _mm_prefetch(row+((b>>3)+9)*132,_MM_HINT_T0);
+      f32 ws0=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+0));
+      f32 ws1=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+2));
+      const u8 *rb=row+(size_t)(b>>3)*132+4;
+      Q4_BLK_ACC(rb, 16*0,_mm256_loadu_si256((const __m256i*)(q8+(size_t)b*32)),      ws0*q8d[b]  ,acc);
+      Q4_BLK_ACC(rb, 16*1,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+1)*32)),  ws0*q8d[b+1],acc);
+      Q4_BLK_ACC(rb, 16*2,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+2)*32)),  ws0*q8d[b+2],acc);
+      Q4_BLK_ACC(rb, 16*3,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+3)*32)),  ws0*q8d[b+3],acc);
+      Q4_BLK_ACC(rb, 16*4,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+4)*32)),  ws1*q8d[b+4],acc);
+      Q4_BLK_ACC(rb, 16*5,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+5)*32)),  ws1*q8d[b+5],acc);
+      Q4_BLK_ACC(rb, 16*6,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+6)*32)),  ws1*q8d[b+6],acc);
+      Q4_BLK_ACC(rb, 16*7,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+7)*32)),  ws1*q8d[b+7],acc);
+    }
+    Q4_ROW_HSUM(acc,out+i);
+  }
+}
+void matmul_q4_0s_psy_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
+  if(B<=0) return;
+  if(B==1){ matmul_q4_0s_psy(out,x,w,n,d); return; }
+  i32 nb=n/32, nsb=n/256;
+  const __m128i mask0F=_mm_set1_epi8(0x0F);
+  const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
+  if(!q4_scratch(n*B)){ memset(out,0,(size_t)B*(size_t)d*sizeof(f32)); return; }
+  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
+  for(i32 t=0;t<B;t++) q4_quant_act(x+(size_t)t*n,n,q8+(size_t)t*n,q8d+(size_t)t*(n/32),NULL);
+  #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    const u8 *row=w+(size_t)i*(size_t)nsb*132;
+    for(i32 t=0;t<B;t++){
+      const u8 *qa=q8+(size_t)t*n;
+      __m256 acc=_mm256_setzero_ps();
+      for(i32 b=0;b<nb;b+=8){
+        f32 ws0=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+0));
+        f32 ws1=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+2));
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*0,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),      ws0*q8d[(size_t)t*nb+b]  ,acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*1,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+1)*32)),ws0*q8d[(size_t)t*nb+b+1],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*2,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+2)*32)),ws0*q8d[(size_t)t*nb+b+2],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*3,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+3)*32)),ws0*q8d[(size_t)t*nb+b+3],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*4,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+4)*32)),ws1*q8d[(size_t)t*nb+b+4],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*5,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+5)*32)),ws1*q8d[(size_t)t*nb+b+5],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*6,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+6)*32)),ws1*q8d[(size_t)t*nb+b+6],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*7,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+7)*32)),ws1*q8d[(size_t)t*nb+b+7],acc);
+      }
+      Q4_ROW_HSUM(acc,out+(size_t)t*d+i);
+    }
+  }
+}
 /* K-quant fused dots (sin dequantizar la fila) ── */
 /* dos mitades de 16 bytes → 32 nibbles contiguos dot contra 32 bytes i8 */
 static inline i32 nib_dot2(const __m128i pa, const __m128i pb, const u8 *act){
@@ -1126,7 +1203,8 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,B); return; }
   if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,B); return; }
   if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,B); return; }
-  // if(type==T_IQ1_S){ matmul_iq1_s_b(out,x,w,n,d,B); return; } // disabled: needs AVX opt
+  if(type==T_Q4_0S){ matmul_q4_0s_b(out,x,w,n,d,B); return; }
+  if(type==T_Q4_0S_PSY){ matmul_q4_0s_psy_b(out,x,w,n,d,B); return; }
 #endif
   if(type==T_F32){
     #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
@@ -1170,6 +1248,7 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   if(type==T_Q4_0){ matmul_q4_0(out,x,w,n,d); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q4_0S){ matmul_q4_0s(out,x,w,n,d); return; }
+  if(type==T_Q4_0S_PSY){ matmul_q4_0s_psy(out,x,w,n,d); return; }
 #endif
 
   if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
@@ -1177,7 +1256,6 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,1); return; }
   if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,1); return; }
   if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,1); return; }
-  // if(type==T_IQ1_S){ matmul_iq1_s_b(out,x,w,n,d,1); return; }
 #endif
   if(type==T_F32){ matmul(out,x,(f32*)w,n,d); return; }
   /* Fallback para tipos no fusionados (Q4_1, etc.): per-thread alloc, no per-row */

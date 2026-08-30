@@ -22,9 +22,10 @@ Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 | **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **40.1** (`--mv 0.5`) / 39.2 (`--mv 1.0`) | **47.9** |
 | **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
 | Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
+| Llama-3.2-1B Q4_0S_PSY | 737 MB | 644 MB | 14.7 / **30.6** (`--mv 0.5`) | — |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-Measured 2026-08-31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` Swapeculative + fallback TLS buf → 25.0→40.1 tok/s (**+60%**) with tradeoff, `--mv 1.0` → 39.2. At ~25 tok/s decode pinned to DDR3L ~9 GB/s; prefill hits compute ~27 GMAC/s. Fallback IQ now uses thread-local buf (no malloc per row) → qwen38 benefits even at `--mv 0`.
+Measured 2026-08-31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` Swapeculative + fallback TLS buf → Qwen3 25.0→40.1 tok/s (**+60%**), Llama Q4_0S_PSY 14.7→30.6 (**+108%**). `--psy` (2 scales/256, 132B) gives better ppl than Q4_0S at same speed. At ~25 tok/s decode pinned to DDR3L ~9 GB/s; prefill hits compute ~27 GMAC/s.
 
 ## 🚀 Quick start
 
@@ -142,8 +143,11 @@ docs/RESEARCH.md   research notes and performance roadmap
 <details>
 <summary><b>📜 Changelog</b></summary>
 
+#### v4.7 — Q4_0S_PSY (psicoacústico) + fallback TLS
+- **Q4_0S_PSY**: 2 escalas fp16 por 256 (132B vs 130B) — baja 128 + alta 128, como MP3. `pack --psy` → +6% speed y mejor ppl que Q4_0S. Llama-3.2-1B 14.7 tok/s (PSY) → 30.6 con `--mv 0.5` (+108%). Fallback IQ ahora TLS buf → qwen38 no hace malloc por fila.
+
 #### v4.6 — Swapeculative MV Triple Band
-- **--mv 0.0..1.0**: tunable skip of FFN (dense) / SSM delta (hybrid) via hash + 2-bit predictor. `25.0 → 38.1 tok/s (+52%)` on Qwen3-0.6B Q4_0 with `--mv 0.5`, `39.2` with `--mv 1.0` on i5-6200U. Quality tradeoff as expected — use 0.3-0.5 for speed, 0 for quality. Works on all archs (Qwen3/Llama/LFM2/Qwen35).
+- **--mv 0.0..1.0**: tunable skip of FFN (dense) / SSM delta (hybrid) via hash + 2-bit predictor. `25.0 → 40.1 tok/s (+60%)` on Qwen3-0.6B Q4_0 with `--mv 0.5`, `39.2` with `--mv 1.0` on i5-6200U. Quality tradeoff as expected — use 0.3-0.5 for speed, 0 for quality. Works on all archs (Qwen3/Llama/LFM2/Qwen35).
 
 #### v4.5
 - Batched (prefill) kernel with deferred accumulation: same treatment as the decode kernel. Qwen2.5-3B prefill 4.3 → 7.8 tok/s (+81 %), bit-exact (`tools/prefilltest`). Sets the stage for speculative verification.

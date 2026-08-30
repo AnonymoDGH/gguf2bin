@@ -183,6 +183,38 @@ static u8 *convert_tensor_q4_0s(const u8 *src, u32 srctype, u64 ne){
   }
   return out;
 }
+/* Q4_0S_PSY: 2 escalas por 256 (baja 128 + alta 128) — psicoacústico 132B */
+static u8 *convert_tensor_q4_0s_psy(const u8 *src, u32 srctype, u64 ne){
+  if(ne%256) return NULL;
+  u64 nsb=ne/256;
+  u8 *out=malloc((size_t)(nsb*132));
+  if(!out) return NULL;
+  f32 blk[256];
+  for(u64 sb=0;sb<nsb;sb++){
+    u64 bs=ggml_block_size(srctype);
+    for(u64 j=0;j<256;j+=bs){
+      gguf_dequant(srctype,(u8*)(src+ (size_t)((sb*256+j)/bs)*ggml_type_bytes(srctype)),blk+j,bs);
+    }
+    f32 amax0=0, amax1=0;
+    for(int i=0;i<128;i++){ f32 a=fabsf(blk[i]); if(a>amax0) amax0=a; }
+    for(int i=128;i<256;i++){ f32 a=fabsf(blk[i]); if(a>amax1) amax1=a; }
+    f32 d0=amax0/7.0f; if(d0<=0) d0=1e-9f;
+    f32 d1=amax1/7.0f; if(d1<=0) d1=1e-9f;
+    u16 s0=f32_to_half(d0), s1=f32_to_half(d1);
+    memcpy(out+sb*132,&s0,2); memcpy(out+sb*132+2,&s1,2);
+    for(int g=0;g<8;g++){
+      f32 d = g<4 ? d0 : d1;
+      u8 *dst=out+sb*132+4+g*16;
+      const f32 *xg=blk+g*32;
+      for(int j=0;j<16;j++){
+        int q0=(int)lroundf(xg[j]/d)+8; int q1=(int)lroundf(xg[j+16]/d)+8;
+        if(q0<0)q0=0; else if(q0>15)q0=15; if(q1<0)q1=0; else if(q1>15)q1=15;
+        dst[j]=(u8)(q0|(q1<<4));
+      }
+    }
+  }
+  return out;
+}
 static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   if(ne%32) return NULL;
   u64 nb=ne/32; u8 *out=malloc(nb*18); if(!out) return NULL;
@@ -203,8 +235,9 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   }
   return out;
 }
-static int g_force_q4s=0;
+static int g_force_q4s=0, g_force_q4s_psy=0;
 void g2bx_set_q4s(int v){ g_force_q4s=v; }
+void g2bx_set_q4s_psy(int v){ g_force_q4s_psy=v; }
 int g2bx_pack(const char *gguf_path, const char *out_path){
   return g2bx_pack_prune(gguf_path, out_path, 0, 0.f);
 }
@@ -395,11 +428,14 @@ skip_prune:
       if(slots[i].type==T_F32 || slots[i].type==T_F16) conv = 1;
       else if(downq4 && slots[i].type!=T_Q4_0) conv = 1;
     }
-    if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && ne_arr[i]%256==0){
+    if(g_force_q4s_psy && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S_PSY && ne_arr[i]%256==0){
+      u8 *qs=convert_tensor_q4_0s_psy(src_ptr[i], slots[i].type, ne_arr[i]);
+      if(qs){ conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S_PSY; slots[i].nbytes=(u32)(ne_arr[i]/256*132); src_sz[i]=slots[i].nbytes; }
+    } else if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && ne_arr[i]%256==0){
       u8 *qs=convert_tensor_q4_0s(src_ptr[i], slots[i].type, ne_arr[i]);
       if(qs){ conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S; slots[i].nbytes=(u32)(ne_arr[i]/256*130); src_sz[i]=slots[i].nbytes; }
     }
-    if(conv && slots[i].type!=T_Q4_0S){
+    if(conv && slots[i].type!=T_Q4_0S && slots[i].type!=T_Q4_0S_PSY){
       u8 *q4=convert_tensor_q4_0(src_ptr[i], slots[i].type, ne_arr[i]);
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }
