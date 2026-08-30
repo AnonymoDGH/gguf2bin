@@ -84,7 +84,7 @@ static void usage(const char *a0){
     "                     (efecto MoE: menos pesos/token -> más tok/s)\n"
     "  %s info   <model.g2bx|gguf>\n"
     "  %s run    <model> [texto] [opts]\n"
-    "      -n N          tokens a generar (def 64)\n"
+    "      -n N / --n N  tokens a generar (def 64; chat def 256)\n"
     "      -t TEMP       temperatura (0=greedy, def 0.7)\n"
     "      --top-k K     top-k (def 40)\n"
     "      --top-p P     nucleus p (def 0.9)\n"
@@ -94,7 +94,7 @@ static void usage(const char *a0){
     "      --gpu         dual band CPU+GPU del head (requiere Vulkan estable)\n"
     "  %s synth  <out.g2bx>\n"
     "  %s bench  <model> [-n N] [--prefill N]\n"
-    "  %s chat   <model> [-n N] [-t TEMP] [--no-think]\n"
+    "  %s chat   <model> [-n N] [-t TEMP] [--system TXT|--no-system] [--no-think|--think]\n"
     "  %s ppl    <model> [-f fichero|-] [-n max_tokens]\n\n"
     "RAM / contexto (run, chat, bench):\n"
     "      -c N / --ctx N     contexto efectivo (KV cache) en runtime (def: el del modelo)\n"
@@ -109,7 +109,7 @@ static void usage(const char *a0){
     "      --prefill N        mide tok/s de procesamiento de prompt (sin logits)\n\n"
     "Ejemplos:\n"
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
-    "  %s chat qwen.g2bx --no-think -t 0.7\n"
+    "  %s chat llama.g2bx --fast --q8-kv -n 256\n"
     "  %s bench qwen.g2bx --max-ram 2048\n",
     a0,a0,a0,a0,a0,a0,a0,a0,a0,a0);
 }
@@ -156,6 +156,7 @@ static int cmd_pack(int argc, char **argv){
     else fprintf(stderr,"pack: no abro %s — uso corpus embebido\n",calib_file);
   }
   if(!text || len==0){ text=(char*)DEFAULT_CALIB; len=strlen(DEFAULT_CALIB); }
+  if(!m.tok){ fprintf(stderr,"pack: el modelo no trae tokenizer — no se puede --prune\n"); if(text!=(char*)DEFAULT_CALIB) free(text); model_free(&m); remove(tmp); return 1; }
   i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
   if(text!=(char*)DEFAULT_CALIB) free(text);
   if(nt>ctx) nt=ctx;
@@ -363,6 +364,7 @@ static i32 sample_advanced(float *logits, int n, float temp, int top_k, float to
     float cum=0.f; int last=keep;
     for(int i=0;i<keep;i++){ cum+=arr[i].logit/sum; if(cum>=top_p){ last=i+1; break; } }
     keep=last;
+    sum=0.f; for(int i=0;i<keep;i++) sum+=arr[i].logit;
   }
   float r=rnd_f()*sum, cum=0.f;
   int id=arr[keep-1].id;
@@ -381,7 +383,7 @@ static int cmd_run(int argc, char **argv){
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
-    if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
+    if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
@@ -395,6 +397,7 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
+    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
@@ -440,7 +443,8 @@ static int cmd_run(int argc, char **argv){
       fprintf(stderr,"run: token id %d fuera de vocab (%d)\n", prompt[i], m.c.vocab);
       free(logits); model_free(&m); return 1;
     }
-    i32 chunk=np-i; if(chunk>8) chunk=8; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
+    i32 pb=m.pf_B>0?m.pf_B:8;
+    i32 chunk=np-i; if(chunk>pb) chunk=pb; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
     if(chunk<=0) break;
     int want=(i+chunk>=np)?1:0; /* logits solo del último token del prompt */
     int rc=model_prefill(&m,&prompt[i],chunk,pos,want?logits:NULL);
@@ -558,12 +562,15 @@ static i32 find_tok(Tokenizer *t, const char *s){
 static int cmd_chat(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
-  i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f; int no_think=0;
+  i32 n_tok=256; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.05f;
+  int no_think=1; int show_think=0;
+  const char *sys_txt="You are a helpful assistant.";
+  int no_sys=0;
   int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
-    if(!strcmp(argv[i],"-n")&&i+1<argc) n_tok=atoi(argv[++i]);
+    if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
@@ -574,10 +581,13 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
-    else if(!strcmp(argv[i],"--no-think")) no_think=1;
+    else if(!strcmp(argv[i],"--no-think")) { no_think=1; show_think=0; }
+    else if(!strcmp(argv[i],"--think")) { no_think=0; show_think=1; }
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--system")&&i+1<argc){ sys_txt=argv[++i]; no_sys=0; }
+    else if(!strcmp(argv[i],"--no-system")){ no_sys=1; sys_txt=NULL; }
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(path,&m)) return 1;
@@ -590,10 +600,24 @@ static int cmd_chat(int argc, char **argv){
     if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
   if(!m.tok){ fprintf(stderr,"chat: el modelo no trae tokenizer. Re-empaqueta\n"); model_free(&m); return 1; }
   Tokenizer *tk=m.tok;
+  /* ChatML (Qwen2/3, LFM2) vs Llama 3.x Instruct */
   i32 im_start=find_tok(tk,"<|im_start|>"), im_end=find_tok(tk,"<|im_end|>");
+  i32 hstart=find_tok(tk,"<|start_header_id|>"), hend=find_tok(tk,"<|end_header_id|>");
+  i32 eot=find_tok(tk,"<|eot_id|>");
+  if(eot<0) eot=find_tok(tk,"<|eom_id|>");
   i32 think_start=find_tok(tk,"<think>"), think_end=find_tok(tk,"</think>");
-  i32 eos=(tk->eos>=0)?tk->eos:im_end;
-  if(im_start<0||im_end<0){ fprintf(stderr,"chat: faltan tokens especiales\n"); model_free(&m); return 1; }
+  int tpl_llama = (hstart>=0 && hend>=0 && eot>=0);
+  int tpl_chatml = (im_start>=0 && im_end>=0);
+  if(!tpl_llama && !tpl_chatml){
+    fprintf(stderr,"chat: sin plantilla (ni ChatML <|im_start|> ni Llama 3 <|eot_id|>)\n");
+    model_free(&m); return 1;
+  }
+  if(tpl_llama && tpl_chatml){
+    if(m.arch==ARCH_LLAMA) tpl_chatml=0; else tpl_llama=0;
+  }
+  i32 turn_start = tpl_llama ? hstart : im_start;
+  i32 turn_end   = tpl_llama ? eot    : im_end;
+  i32 eos=(tk->eos>=0)?tk->eos:turn_end;
   f32 *logits=calloc((size_t)m.c.vocab,sizeof(f32));
   if(!logits){ model_free(&m); return 1; }
   rng_seed(seed);
@@ -601,36 +625,42 @@ static int cmd_chat(int argc, char **argv){
   i32 *conv=NULL; i32 cn=0, ccap=2048; conv=malloc((size_t)ccap*sizeof(i32));
   if(!conv){ free(logits); model_free(&m); return 1; }
 #define PUSH(x) do{ if(cn>=ccap){ ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
+#define PUSH_STR(s) do{ i32 *_ids=NULL; i32 _n=tok_encode(tk,(s),&_ids); for(i32 _i=0;_i<_n;_i++) PUSH(_ids[_i]); free(_ids); }while(0)
   i32 sys_len=0;
-  if(tk->bos>=0) PUSH(tk->bos); /* LFM2.5 exige <|startoftext|> al inicio */
-  {
-    i32 *st; i32 sn=tok_encode(tk,"system\nYou are a helpful assistant.",&st);
-    PUSH(im_start); for(i32 i=0;i<sn;i++) PUSH(st[i]); PUSH(im_end);
-    i32 *nl; i32 nnl=tok_encode(tk,"\n",&nl); for(i32 i=0;i<nnl;i++) PUSH(nl[i]); free(nl); free(st);
+  if(tk->bos>=0) PUSH(tk->bos);
+  if(!no_sys && sys_txt && *sys_txt){
+    if(tpl_llama){
+      PUSH(hstart); PUSH_STR("system"); PUSH(hend); PUSH_STR("\n\n");
+      PUSH_STR(sys_txt); PUSH(eot);
+    } else {
+      char sbuf[4096];
+      snprintf(sbuf,sizeof sbuf,"system\n%s",sys_txt);
+      PUSH(im_start); PUSH_STR(sbuf); PUSH(im_end); PUSH_STR("\n");
+    }
   }
   sys_len=cn;
   i32 pos=0, fed=0;
   char line[8192];
-  printf("=== Chat Qwen3 %s (escribe 'salir') ===\n", no_think?"[no-think]":"[thinking]");
+  const char *aname = m.arch==ARCH_LLAMA?"Llama":m.arch==ARCH_LFM2?"LFM2":m.arch==ARCH_QWEN2?"Qwen2":"Qwen3";
+  printf("=== Chat %s %s (escribe 'salir') ===\n", aname,
+    tpl_llama?"[llama3]":(no_think?"[no-think]":(show_think?"[thinking]":"[think oculto]")));
   for(;;){
     printf("\nTu> "); fflush(stdout);
     if(!fgets(line,sizeof line,stdin)) break;
     size_t ll=strlen(line); while(ll>0 && (line[ll-1]=='\n'||line[ll-1]=='\r')) line[--ll]=0;
     if(!strcmp(line,"salir")||!strcmp(line,"exit")) break;
     if(ll==0) continue;
-    char ub[9000]; snprintf(ub,sizeof ub,"user\n%s",line);
-    i32 *ut; i32 un=tok_encode(tk,ub,&ut);
-    i32 *at; i32 an=tok_encode(tk,"assistant\n",&at);
-    PUSH(im_start); for(i32 i=0;i<un;i++) PUSH(ut[i]); PUSH(im_end);
-    i32 *nl2; i32 nnl2=tok_encode(tk,"\n",&nl2); for(i32 i=0;i<nnl2;i++) PUSH(nl2[i]); free(nl2);
-    PUSH(im_start); for(i32 i=0;i<an;i++) PUSH(at[i]);
-    if(no_think && think_start>=0 && think_end>=0){
-      PUSH(think_start);
-      i32 *nn1; i32 n1=tok_encode(tk,"\n\n",&nn1); for(i32 i=0;i<n1;i++) PUSH(nn1[i]); free(nn1);
-      PUSH(think_end);
-      i32 *nn2; i32 n2=tok_encode(tk,"\n\n",&nn2); for(i32 i=0;i<n2;i++) PUSH(nn2[i]); free(nn2);
+    if(tpl_llama){
+      PUSH(hstart); PUSH_STR("user"); PUSH(hend); PUSH_STR("\n\n"); PUSH_STR(line); PUSH(eot);
+      PUSH(hstart); PUSH_STR("assistant"); PUSH(hend); PUSH_STR("\n\n");
+    } else {
+      char ub[9000]; snprintf(ub,sizeof ub,"user\n%s",line);
+      PUSH(im_start); PUSH_STR(ub); PUSH(im_end); PUSH_STR("\n");
+      PUSH(im_start); PUSH_STR("assistant\n");
+      if(no_think && think_start>=0 && think_end>=0){
+        PUSH(think_start); PUSH_STR("\n\n"); PUSH(think_end); PUSH_STR("\n\n");
+      }
     }
-    free(ut); free(at);
     /* Compactacion: si el turno no cabe, conserva system + turnos recientes y re-prefill */
     {
       i32 need = (cn-fed) + n_tok + 4;
@@ -638,7 +668,7 @@ static int cmd_chat(int argc, char **argv){
         i32 budget=m.ctx/2;
         i32 tail=budget-sys_len; if(tail<64) tail=64;
         i32 start=cn-tail; if(start<sys_len) start=sys_len;
-        while(start<cn && conv[start]!=im_start) start++;
+        while(start<cn && conv[start]!=turn_start) start++;
         if(start>=cn){ start=cn-16; if(start<sys_len) start=sys_len; }
         fprintf(stderr,"chat: contexto lleno (%d/%d) -> compacto a system + %d tokens recientes\n",
           pos,m.ctx,cn-start);
@@ -652,7 +682,8 @@ static int cmd_chat(int argc, char **argv){
         fprintf(stderr,"chat: contexto lleno (ctx=%d)\n", m.ctx);
         break;
       }
-      i32 chunk=cn-fed; if(chunk>8) chunk=8; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
+      i32 pb=m.pf_B>0?m.pf_B:8;
+      i32 chunk=cn-fed; if(chunk>pb) chunk=pb; if(pos+chunk>m.ctx) chunk=m.ctx-pos;
       if(chunk<=0) break;
       int want=(fed+chunk>=cn)?1:0;
       int rc=model_prefill(&m,&conv[fed],chunk,pos,want?logits:NULL);
@@ -663,26 +694,44 @@ static int cmd_chat(int argc, char **argv){
       pos+=chunk; fed+=chunk;
     }
     if(pos >= m.ctx){ printf("\n"); continue; }
-    printf("Qwen3> "); fflush(stdout);
+    i32 gen_n=n_tok;
+    { i32 left=m.ctx-pos-2; if(left<1) left=1; if(gen_n>left) gen_n=left; }
+    printf("%s> ", aname); fflush(stdout);
     RecentBuf recent; memset(&recent,0,sizeof recent);
     i32 rep_tmp[RECENT_USE];
-    for(i32 step=0; step<n_tok; step++){
+    int in_think=0;
+    for(i32 step=0; step<gen_n; step++){
       if(pos >= m.ctx){
         fprintf(stderr,"\nchat: contexto lleno; stop\n");
         break;
       }
       int rp_n = recent_snapshot(&recent, rep_tmp, RECENT_USE);
       i32 nxt=sample_advanced(logits,m.c.vocab,temp,top_k,top_p,rep_pen,rep_tmp,rp_n);
-      if(nxt==eos || nxt==im_end) break;
-      i32 one=nxt; char *piece=tok_decode(tk,&one,1); printf("%s",piece); fflush(stdout); free(piece);
+      if(nxt==eos || nxt==turn_end || nxt==turn_start) break;
+      if(tpl_llama && (nxt==hstart || nxt==eot || nxt==hend)) break;
+      if(tk->bos>=0 && nxt==tk->bos) break;
       recent_push(&recent, nxt);
       PUSH(nxt);
+      int hide = 0;
+      if(think_start>=0 && nxt==think_start){ in_think=1; hide=!show_think; }
+      else if(think_end>=0 && nxt==think_end){ hide=!show_think; in_think=0; }
+      else if(in_think && !show_think) hide=1;
+      if(!hide){
+        i32 one=nxt; char *piece=tok_decode(tk,&one,1);
+        if(piece){
+          size_t pl=strlen(piece);
+          int ctrl = (pl>=4 && piece[0]=='<' && piece[1]=='|' && piece[pl-2]=='|' && piece[pl-1]=='>');
+          if(!ctrl){ printf("%s",piece); fflush(stdout); }
+          free(piece);
+        }
+      }
       model_forward(&m,nxt,pos++,logits);
     }
     printf("\n");
-    if(cn>0 && conv[cn-1]!=im_end) PUSH(im_end);
-    i32 *nl3; i32 nnl3=tok_encode(tk,"\n",&nl3); for(i32 i=0;i<nnl3;i++) PUSH(nl3[i]); free(nl3);
+    if(cn>0 && conv[cn-1]!=turn_end) PUSH(turn_end);
+    if(tpl_chatml) PUSH_STR("\n");
   }
+#undef PUSH_STR
 #undef PUSH
   free(conv); free(logits); model_free(&m); return 0;
 }
@@ -706,7 +755,7 @@ static int cmd_bench(int argc, char **argv){
   int gpu=0;
   i32 prefill_n=0; u64 seed=0; int ndrop=0;
   for(int i=3;i<argc;i++){
-    if(!strcmp(argv[i],"-n")&&i+1<argc) n=atoi(argv[++i]);
+    if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
     else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
@@ -737,8 +786,9 @@ static int cmd_bench(int argc, char **argv){
       double t0=now_sec();
       i32 done=0;
       while(done<prefill_n){
-        i32 chunk=prefill_n-done; if(chunk>8) chunk=8;
-        i32 tokv[8];
+        i32 pb=m.pf_B>0?m.pf_B:8;
+        i32 chunk=prefill_n-done; if(chunk>pb) chunk=pb;
+        i32 tokv[32]; if(chunk>32) chunk=32;
         for(i32 j=0;j<chunk;j++) tokv[j]=(i32)((done+j) % (m.c.vocab>1?m.c.vocab:1));
         if(model_prefill(&m,tokv,chunk,done,NULL)){
           for(i32 j=0;j<chunk;j++)
@@ -772,6 +822,10 @@ static int cmd_bench(int argc, char **argv){
 }
 
 int main(int argc, char **argv){
+#if defined(_WIN32)
+  SetConsoleOutputCP(65001);
+  SetConsoleCP(65001);
+#endif
   fprintf(stderr,"[main] arranque\n");
   if(argc<2){ usage(argv[0]); return 1; }
   if(!strcmp(argv[1],"--gpu-worker")) return vk_worker_main(argc,argv);

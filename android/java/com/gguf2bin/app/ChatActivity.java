@@ -26,6 +26,8 @@ public class ChatActivity extends Activity {
     private int ctx = 2048, maxTok = 256, topK = 40;
     private float temp = 0.7f;
     private boolean userScrolling = false;
+    private volatile boolean closed = false;
+    private Thread genThread;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -64,6 +66,10 @@ public class ChatActivity extends Activity {
             long t0 = System.currentTimeMillis();
             final long ptr = Native.loadModel(path, ctx);
             runOnUiThread(() -> {
+                if (closed || isFinishing()) {
+                    if (ptr != 0) Native.freeModel(ptr);
+                    return;
+                }
                 if (ptr == 0) {
                     Toast.makeText(this, "No se pudo cargar el modelo", 1).show();
                     out.setText("Error al cargar el modelo.");
@@ -87,15 +93,17 @@ public class ChatActivity extends Activity {
                 out.append("\n\n\u25AA Tu: " + q + "\n\u25AA Bot: ");
                 autoScroll();
             });
-            new Thread(() -> {
+            genThread = new Thread(() -> {
                 final String reply = Native.generate(model, history.toString(), maxTok, temp, topK,
-                    t -> ui.post(() -> { out.append(t); autoScroll(); }));
-                if (reply != null) history.append(reply);
+                    t -> ui.post(() -> { if (!closed) { out.append(t); autoScroll(); } }));
+                if (reply != null && !closed) history.append(reply);
                 ui.post(() -> {
+                    if (closed) return;
                     send.setEnabled(true); input.setEnabled(true); busy.setVisibility(View.GONE);
                     autoScroll();
                 });
-            }).start();
+            });
+            genThread.start();
         });
     }
 
@@ -116,7 +124,12 @@ public class ChatActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        super.onDestroy();
+        closed = true;
+        if (model != 0) Native.requestCancel(model);
+        if (genThread != null) {
+            try { genThread.join(2000); } catch (InterruptedException ignored) {}
+        }
         if (model != 0) { Native.freeModel(model); model = 0; }
+        super.onDestroy();
     }
 }

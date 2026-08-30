@@ -10,16 +10,21 @@ typedef int8_t   i8;  typedef int16_t  i16; typedef int32_t  i32; typedef int64_
 typedef float    f32;
 
 #define G2BX_MAGIC "G2BX"
-#define G2BX_VER   1u
-#define G2BX_VER_MAX 1u
+#define G2BX_VER   2u
+#define G2BX_VER_MAX 2u
+#define G2BX_CFG_V1 40 /* bytes de ModelCfg en v1 */
 #define ALIGN64(x) (((x)+63ull)&~63ull)
 
 enum {
   T_F32=0, T_F16=1, T_Q4_0=2, T_Q4_1=3, T_Q5_0=6, T_Q5_1=7,
   T_Q8_0=8, T_Q8_1=9, T_Q2_K=10, T_Q3_K=11, T_Q4_K=12, T_Q5_K=13, T_Q6_K=14, T_Q8_K=15,
-  T_IQ4_NL=16, T_IQ4_XS=17, T_IQ3_XXS=18, T_IQ2_XXS=19, T_IQ2_XS=20, T_IQ3_S=21, T_IQ2_S=22, T_IQ1_S=23, T_IQ1_M=24, T_Q4_0S=25
+  /* IDs GGUF reales (ggml.h): los IQ estaban desalineados */
+  T_IQ2_XXS=16, T_IQ2_XS=17, T_IQ3_XXS=18, T_IQ1_S=19, T_IQ4_NL=20,
+  T_IQ3_S=21, T_IQ2_S=22, T_IQ4_XS=23, T_F64=28,
+  T_IQ1_M=29, T_BF16=30,
+  T_Q4_0S=25 /* interno: reutiliza un ID que GGUF no usa en pesos (compat con g2bx antiguos) */
 };
-enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3 };
+enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3, ARCH_QWEN35=4 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };
 enum {
   R_TOK_EMBD=0, R_OUT_NORM, R_OUTPUT,
@@ -30,6 +35,16 @@ enum {
   R_CONV_W,      /* LFM2 shortconv: peso depthwise [kernel,channels] F32 */
   R_CONV_IN,     /* LFM2 shortconv: proyección entrada (3*dim) */
   R_CONV_OUT,    /* LFM2 shortconv: proyección salida */
+  /* qwen35 híbrido (GDN + atención completa cada N capas) */
+  R_ATTN_QKV,    /* qkv fusionado de la capa lineal (gated delta net) */
+  R_ATTN_GATE,   /* z gate de la capa lineal / gate sigmoide de la atención completa */
+  R_SSM_A,       /* -exp(A_log), vector [dt_rank] */
+  R_SSM_DT,      /* dt bias [dt_rank] */
+  R_SSM_CONV,    /* conv1d depthwise [d_conv, conv_dim] F32 */
+  R_SSM_ALPHA,   /* proj alpha [dim, dt_rank] */
+  R_SSM_BETA,    /* proj beta [dim, dt_rank] */
+  R_SSM_NORM,    /* rmsnorm gated [head_v_dim] */
+  R_SSM_OUT,     /* out_proj [value_dim, dim] */
   R_COUNT
 };
 
@@ -75,6 +90,10 @@ u16 f32_to_half(f32 f);
 typedef struct {
   i32 dim, hidden_dim, n_layers, n_heads, n_kv_heads;
   i32 vocab, seq_len, head_dim; f32 eps, rope_theta;
+  /* v2 — híbridos SSM (qwen35); en v1 estos bytes no existen (leídos como 0) */
+  i32 fa_interval;                 /* atención completa cada N capas; 0 = denso */
+  i32 ssm_d_state, ssm_n_group, ssm_dt_rank, ssm_inner, ssm_d_conv;
+  i32 n_rot;                       /* dims rotadas por head en atención (0=hd completo) */
 } ModelCfg;
 typedef struct { u8 role; u16 layer; u8 type; u32 nbytes; u64 off; } Slot;
 #pragma pack(pop)
@@ -114,7 +133,8 @@ typedef struct {
   u8  *kcq, *vcq;             /* KV cuantizado Q8_0 (cuando F_KV_Q8) */
   i32 ctx;                    /* contexto efectivo en runtime (<= c.seq_len) */
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
-  f32 *conv_state;            /* LFM2: estado conv por capa [L][K-1][dim] */
+  f32 *conv_state;            /* LFM2/qwen35: estado conv por capa */
+  f32 *ssm_st;                /* qwen35: estado recurrente GDN [n_recr][nv][dv][dv] */
   /* ShortGPT: salto de bloques redundantes */
   u8 *skip_layer;             /* [n_layers] 1=omitir bloque completo */
   f32 *bi_pre, *bi_post;      /* scratch dim para medir Block Influence */
@@ -134,6 +154,7 @@ typedef struct {
   u8 use_swap;
   void *swap_view; size_t swap_size;
   char *swap_path;
+  char *src_path; /* G2BX realmente mapeado (puede ser cache .gguf.g2bx) */
   /* mmap state (when use_mmap) */
   void *map_view;
   size_t map_size;

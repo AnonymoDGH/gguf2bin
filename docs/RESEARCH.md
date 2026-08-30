@@ -1,4 +1,6 @@
-# Investigación: super-comprimir Qwen3 y runtime propio — FIXED v3.4
+# Investigación: super-comprimir Qwen3 y runtime propio — v4.5
+
+> Nota: este doc cubre hasta v3.4 en detalle. Para v4.x ver `README.md` (changelog) y `ROADMAP_PERF.md`. G2BX ya va en v2 (ModelCfg extendida para qwen35 híbrido).
 
 ## Novedades v3.4 — runtime en 2 GB de RAM
 

@@ -25,9 +25,19 @@ static int parse_name(const char *name, u8 *role, u16 *layer){
   if(!strcmp(p,"attn_k.bias")){ *role=R_ATTN_K_BIAS; return 0; }
   if(!strcmp(p,"attn_v.bias")){ *role=R_ATTN_V_BIAS; return 0; }
   if(!strcmp(p,"ffn_norm.weight")){ *role=R_FFN_NORM; return 0; }
+  if(!strcmp(p,"post_attention_norm.weight")){ *role=R_FFN_NORM; return 0; } /* qwen35: norm pre-FFN */
   if(!strcmp(p,"ffn_gate.weight")){ *role=R_FFN_GATE; return 0; }
   if(!strcmp(p,"ffn_up.weight")){ *role=R_FFN_UP; return 0; }
   if(!strcmp(p,"ffn_down.weight")){ *role=R_FFN_DOWN; return 0; }
+  if(!strcmp(p,"attn_qkv.weight")){ *role=R_ATTN_QKV; return 0; }
+  if(!strcmp(p,"attn_gate.weight")){ *role=R_ATTN_GATE; return 0; }
+  if(!strcmp(p,"ssm_a")){ *role=R_SSM_A; return 0; }
+  if(!strcmp(p,"ssm_dt.bias")){ *role=R_SSM_DT; return 0; }
+  if(!strcmp(p,"ssm_conv1d.weight")){ *role=R_SSM_CONV; return 0; }
+  if(!strcmp(p,"ssm_alpha.weight")){ *role=R_SSM_ALPHA; return 0; }
+  if(!strcmp(p,"ssm_beta.weight")){ *role=R_SSM_BETA; return 0; }
+  if(!strcmp(p,"ssm_norm.weight")){ *role=R_SSM_NORM; return 0; }
+  if(!strcmp(p,"ssm_out.weight")){ *role=R_SSM_OUT; return 0; }
   if(!strcmp(p,"shortconv.conv.weight")){ *role=R_CONV_W; return 0; }
   if(!strcmp(p,"shortconv.in_proj.weight")){ *role=R_CONV_IN; return 0; }
   if(!strcmp(p,"shortconv.out_proj.weight")){ *role=R_CONV_OUT; return 0; }
@@ -54,8 +64,10 @@ static f32 meta_preff(GGUF *g, const char *arch, const char *suf){
 static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   memset(c,0,sizeof *c); *flags=0;
   char aname[64]={0}; gguf_meta_str(g,"general.architecture",aname,sizeof aname);
+  /* qwen35: híbrido gated delta-net + atención completa cada N capas */
+  const int is_qwen35=!strcmp(aname,"qwen35");
   /* Stub bailingmoe3 / MLA+MoE+SSM: no soportado en runtime denso Qwen/Llama */
-  if(aname[0] && (!strcmp(aname,"bailingmoe3") || !strcmp(aname,"bailingmoe") || strstr(aname,"moe3") || strstr(aname,"ssm"))){
+  if(aname[0] && (!strcmp(aname,"bailingmoe3") || !strcmp(aname,"bailingmoe") || strstr(aname,"moe3"))){
     fprintf(stderr,"g2bx: arquitectura '%s' no soportada (MoE %lld expertos + MLA + SSM). Solo Qwen3/Qwen2/Llama densos.\n",
       aname, (long long)gguf_meta_i64(g,"bailingmoe3.expert_count"));
     fprintf(stderr,"g2bx: Ling-3.0-tiny usa MLA (q_lora/kv_lora) + 128 expertos + IQ1_S; requiere llama.cpp. Archivado en D:\\gguf2bin_models\\\n");
@@ -63,10 +75,11 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   }
   /* Arquitecturas conocidas LLM/Qwen; cualquier otra (p.ej. dflash) se deduce por heurística */
   const int is_llama=!strcmp(aname,"llama");
-  const int is_qwen =!strcmp(aname,"qwen2")||!strcmp(aname,"qwen2moe")||!strcmp(aname,"qwen3");
+  const int is_qwen =!strcmp(aname,"qwen2")||!strcmp(aname,"qwen2moe")||!strcmp(aname,"qwen3")||is_qwen35;
   const int is_lfm2 =!strncmp(aname,"lfm2",4);
   if(is_llama) *arch=ARCH_LLAMA;
   else if(is_lfm2) *arch=ARCH_LFM2;
+  else if(is_qwen35) *arch=ARCH_QWEN35;
   else {
     *arch = is_qwen ? ARCH_QWEN2 : ARCH_QWEN3; /* custom -> NEOX/Qwen por defecto */
     if(!is_qwen && aname[0]){
@@ -103,6 +116,20 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   c->rope_theta =meta_preff(g,p,"rope.freq_base");
   if(c->rope_theta==0.f) c->rope_theta=(*arch==ARCH_LLAMA)?10000.f:1000000.f;
   if(!c->n_kv_heads) c->n_kv_heads=c->n_heads;
+  /* qwen35: params del gated delta net */
+  if(*arch==ARCH_QWEN35){
+    c->fa_interval =(i32)meta_pref(g,p,"full_attention_interval"); if(c->fa_interval<=0) c->fa_interval=4;
+    c->ssm_d_state =(i32)meta_pref(g,p,"ssm.state_size");
+    c->ssm_n_group =(i32)meta_pref(g,p,"ssm.group_count");
+    c->ssm_dt_rank =(i32)meta_pref(g,p,"ssm.time_step_rank");
+    c->ssm_inner   =(i32)meta_pref(g,p,"ssm.inner_size");
+    c->ssm_d_conv  =(i32)meta_pref(g,p,"ssm.conv_kernel"); if(c->ssm_d_conv<=0) c->ssm_d_conv=4;
+    c->n_rot       =(i32)meta_pref(g,p,"rope.dimension_count");
+    if(!c->n_rot) c->n_rot=c->head_dim;
+    if(c->ssm_d_state<=0||c->ssm_dt_rank<=0||c->ssm_n_group<=0||c->ssm_inner<=0){
+      fprintf(stderr,"g2bx: qwen35 sin params ssm completos\n"); return -1;
+    }
+  } else { c->n_rot=c->head_dim; }
   if(!c->vocab){
     GTensor *e=gguf_by_name(g,"token_embd.weight");
     if(e && e->n_dims>=2){ u64 a=e->dims[0], b=e->dims[1]; c->vocab=(i32)(a>b?a:b); if(!c->dim) c->dim=(i32)(a<b?a:b); }
@@ -119,7 +146,8 @@ static u64 ne_of(const GTensor *t){ u64 n=1; for(u32 i=0;i<t->n_dims;i++) n*=t->
 static int is_weight_role(u8 role){
   switch(role){ case R_TOK_EMBD: case R_OUTPUT: case R_ATTN_Q: case R_ATTN_K: case R_ATTN_V: case R_ATTN_O:
     case R_FFN_GATE: case R_FFN_UP: case R_FFN_DOWN:
-    case R_CONV_IN: case R_CONV_OUT: return 1; default: return 0; }
+    case R_CONV_IN: case R_CONV_OUT:
+    case R_ATTN_QKV: case R_ATTN_GATE: case R_SSM_OUT: return 1; default: return 0; }
 }
 static void quant_block_q4_0(const f32 *x, u8 *dst){
   f32 amax=0; for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax) amax=a; } f32 d=amax/7.0f; if(d<=0) d=1e-9f; u16 sd=f32_to_half(d); memcpy(dst,&sd,2);
@@ -206,13 +234,17 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
     u8 role; u16 layer; if(parse_name(g.t[i].name,&role,&layer)){ skipped_unknown++; continue; }
     u32 ty=g.t[i].type;
     if(ty!=T_F32 && ty!=T_F16 && ty!=T_Q4_0 && ty!=T_Q4_1 && ty!=T_Q5_0 && ty!=T_Q8_0
-     && ty!=T_Q2_K && ty!=T_Q3_K && ty!=T_Q4_K && ty!=T_Q5_K && ty!=T_Q6_K && ty!=T_Q8_K){
+     && ty!=T_Q2_K && ty!=T_Q3_K && ty!=T_Q4_K && ty!=T_Q5_K && ty!=T_Q6_K && ty!=T_Q8_K
+     && ty!=T_IQ2_XXS && ty!=T_IQ2_XS && ty!=T_IQ2_S && ty!=T_IQ3_XXS && ty!=T_IQ3_S
+     && ty!=T_IQ1_S && ty!=T_IQ1_M && ty!=T_IQ4_NL && ty!=T_IQ4_XS){
       fprintf(stderr,"g2bx: tipo %u no soportado en tensor %s (omitido)\n", ty, g.t[i].name);
       skipped_type++; continue;
     }
     u64 ne=ne_of(&g.t[i]); u32 nbytes=(u32)ggml_type_size(g.t[i].type,ne);
+    u8 *tp=gguf_tensor_ptr(&g,&g.t[i]);
+    if(!tp){ fprintf(stderr,"g2bx: tensor %s fuera del fichero (omitido)\n", g.t[i].name); skipped_type++; continue; }
     slots[ns].role=role; slots[ns].layer=layer; slots[ns].type=(u8)g.t[i].type; slots[ns].nbytes=nbytes;
-    src_ptr[ns]=gguf_tensor_ptr(&g,&g.t[i]); src_sz[ns]=nbytes; ne_arr[ns]=ne; ns++;
+    src_ptr[ns]=tp; src_sz[ns]=nbytes; ne_arr[ns]=ne; ns++;
   }
   if(skipped_type)
     fprintf(stderr,"g2bx: %u tensores omitidos por tipo no soportado\n", skipped_type);
@@ -257,6 +289,10 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
         fprintf(stderr,"prune: OOM — desactivada\n"); prune=0.f;
       } else {
         i32 new_hidden=(i32)(keep*(u32)G);
+        if(arch==ARCH_LFM2 && new_hidden<3*dim){
+          fprintf(stderr,"prune: LFM2 necesita hidden>=3*dim (%d); poda desactivada\n",3*dim);
+          prune=0.f; free(kept); free(grow); free(urw); free(bscore); free(order); goto skip_prune;
+        }
         u64 old_bytes=0,new_bytes=0;
         for(i32 L=0;L<c.n_layers;L++){
           Slot *sg=NULL,*su=NULL,*sd=NULL;
@@ -350,9 +386,9 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       }
     }
   }
+skip_prune:
 
-  /* FIX v3.4: F32/F16->Q4_0 siempre; con --q4 TODOS los tensores de peso
-     se convierten a Q4_0 fusionado para el kernel SIMD rápido. */
+  /* F32/F16->Q4_0; --q4 convierte todos los pesos al kernel SIMD. */
   for(u32 i=0;i<ns;i++){
     int conv = 0;
     if(is_weight_role(slots[i].role)){
@@ -391,14 +427,15 @@ int g2bx_info(const char *path){
   FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"g2bx: no abro %s\n",path); return -1; }
   char magic[4]; u16 ver; u8 arch,flags; ModelCfg c; u32 ns;
   if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)||fread(&ver,2,1,f)!=1||fread(&arch,1,1,f)!=1||fread(&flags,1,1,f)!=1||fread(&c,sizeof c,1,f)!=1||fread(&ns,4,1,f)!=1){ fprintf(stderr,"g2bx: cabecera invalida\n"); fclose(f); return -1; }
-  static const char *an[]={"llama","qwen2","qwen3"}; printf("G2BX v%u arch=%s flags=0x%02x\n",ver, arch<3?an[arch]:"?",flags);
+  static const char *an[]={"llama","qwen2","qwen3","lfm2","qwen35"}; printf("G2BX v%u arch=%s flags=0x%02x\n",ver, arch<5?an[arch]:"?",flags);
   printf("  dim=%d hidden=%d layers=%d heads=%d kv=%d head_dim=%d\n",c.dim,c.hidden_dim,c.n_layers,c.n_heads,c.n_kv_heads,c.head_dim);
   printf("  vocab=%d seq=%d eps=%g rope_theta=%.0f\n",c.vocab,c.seq_len,c.eps,c.rope_theta);
   printf("  slots=%u\n",ns); Slot *sl=malloc(ns*sizeof(Slot));
   if(!sl || fread(sl,sizeof(Slot),ns,f)!=ns){ free(sl); fclose(f); return -1; }
   static const char *rn[]={"tok_embd","out_norm","output","attn_norm","attn_q","attn_k","attn_v",
     "attn_o","attn_q_norm","attn_k_norm","ffn_norm","ffn_gate","ffn_up","ffn_down",
-    "attn_q_bias","attn_k_bias","attn_v_bias","embd_norm","conv_w","conv_in","conv_out"};
+    "attn_q_bias","attn_k_bias","attn_v_bias","embd_norm","conv_w","conv_in","conv_out",
+    "attn_qkv","attn_gate","ssm_a","ssm_dt","ssm_conv1d","ssm_alpha","ssm_beta","ssm_norm","ssm_out"};
   u64 total=0; for(u32 i=0;i<ns;i++){ const char *r=sl[i].role<R_COUNT?rn[sl[i].role]:"?"; if(sl[i].layer==0xFFFF) printf("  [%u] %-12s global type=%u %u B off=%llu\n",i,r,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); else printf("  [%u] %-12s L%-4u type=%u %u B off=%llu\n",i,r,sl[i].layer,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); total+=sl[i].nbytes; }
   printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); free(sl); fclose(f); return 0;
 }

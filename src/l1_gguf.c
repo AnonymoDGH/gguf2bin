@@ -89,7 +89,7 @@ int gguf_load(const char *path, GGUF *g){
   {
     int mapped=0;
 #if defined(_WIN32)
-    HANDLE hf=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING|FILE_FLAG_SEQUENTIAL_SCAN,FILE_ATTRIBUTE_NORMAL,NULL);
+    HANDLE hf=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_SEQUENTIAL_SCAN,NULL);
     if(hf!=INVALID_HANDLE_VALUE){
       HANDLE hm=CreateFileMappingA(hf,NULL,PAGE_READONLY,0,0,NULL);
       if(hm){
@@ -120,19 +120,19 @@ int gguf_load(const char *path, GGUF *g){
   fclose(f);
   const u8 *end=g->data+g->size;
   u8 *p=g->data;
-  if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: magic invalido\n"); free(g->data); g->data=NULL; return -1; }
+  if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: magic invalido\n"); gguf_free(g); return -1; }
   g->version   = ru32(p+4);
   g->n_tensors = ru64(p+8);
   u64 meta_n   = ru64(p+16);
-  if(g->n_tensors > (1ull<<20) || meta_n > (1ull<<20)){ fprintf(stderr,"gguf: header corrupto (tensors=%llu meta=%llu)\n",(unsigned long long)g->n_tensors,(unsigned long long)meta_n); free(g->data); g->data=NULL; return -1; }
+  if(g->n_tensors > (1ull<<20) || meta_n > (1ull<<20)){ fprintf(stderr,"gguf: header corrupto (tensors=%llu meta=%llu)\n",(unsigned long long)g->n_tensors,(unsigned long long)meta_n); gguf_free(g); return -1; }
   p+=GGUF_HDR_SIZE;
   g->alignment=32;
   for(u64 i=0;i<meta_n;i++){
-    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: metadata truncada\n"); free(g->data); g->data=NULL; return -1; }
+    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: metadata truncada\n"); gguf_free(g); return -1; }
     u64 klen=ru64(p); p+=8;
-    if(klen>4096||!bounds(p,end,klen)){ fprintf(stderr,"gguf: key corrupta (klen=%llu)\n",(unsigned long long)klen); free(g->data); g->data=NULL; return -1; }
+    if(klen>4096||!bounds(p,end,klen)){ fprintf(stderr,"gguf: key corrupta (klen=%llu)\n",(unsigned long long)klen); gguf_free(g); return -1; }
     char *key=(char*)p; p+=klen;
-    if(!bounds(p,end,4)){ fprintf(stderr,"gguf: metadata truncada\n"); free(g->data); g->data=NULL; return -1; }
+    if(!bounds(p,end,4)){ fprintf(stderr,"gguf: metadata truncada\n"); gguf_free(g); return -1; }
     u32 vt=ru32(p); p+=4;
     if(klen==16 && !memcmp(key,"general.alignment",16)){
       if(bounds(p,end,meta_adv(vt)))
@@ -140,11 +140,11 @@ int gguf_load(const char *path, GGUF *g){
     }
     if(!g->alignment) g->alignment=32;
     u8 *np=skip_val(p,end,vt);
-    if(!np){ fprintf(stderr,"gguf: metadata corrupta en key=%.*s\n",(int)(klen<64?klen:64),key); free(g->data); g->data=NULL; return -1; }
+    if(!np){ fprintf(stderr,"gguf: metadata corrupta en key=%.*s\n",(int)(klen<64?klen:64),key); gguf_free(g); return -1; }
     p=np;
   }
   g->t=calloc(g->n_tensors,sizeof(GTensor));
-  if(!g->t){ free(g->data); g->data=NULL; return -1; }
+  if(!g->t){ gguf_free(g); return -1; }
   for(u64 i=0;i<g->n_tensors;i++){
     if(!bounds(p,end,8)){ fprintf(stderr,"gguf: tensor name header truncado\n"); goto fail_tensors; }
     u64 nlen=ru64(p); p+=8;
@@ -167,13 +167,14 @@ int gguf_load(const char *path, GGUF *g){
   g->data_off=(off+g->alignment-1)&~(g->alignment-1);
   return 0;
 fail_tensors:
-  for(u64 j=0;j<g->n_tensors;j++){ free(g->t[j].name); free(g->t[j].dims); }
-  free(g->t); g->t=NULL; free(g->data); g->data=NULL; return -1;
+  gguf_free(g); return -1;
 }
 void gguf_free(GGUF *g){
-  if(!g||!g->data) return;
-  for(u64 i=0;i<g->n_tensors;i++){ free(g->t[i].name); free(g->t[i].dims); }
-  free(g->t);
+  if(!g) return;
+  if(g->t){
+    for(u64 i=0;i<g->n_tensors;i++){ free(g->t[i].name); free(g->t[i].dims); }
+    free(g->t); g->t=NULL;
+  }
   if(g->own_data==2){
 #if defined(_WIN32)
     if(g->map_view) UnmapViewOfFile(g->map_view);
@@ -193,7 +194,18 @@ void gguf_free(GGUF *g){
   g->fd=-1;
 #endif
 }
-u8 *gguf_tensor_ptr(GGUF *g, GTensor *t){ return g->data+g->data_off+t->offset; }
+u8 *gguf_tensor_ptr(GGUF *g, GTensor *t){
+  if(!g||!t||!g->data) return NULL;
+  u64 ne=1;
+  for(u32 i=0;i<t->n_dims;i++){
+    if(!t->dims || t->dims[i]==0 || ne>UINT64_MAX/t->dims[i]) return NULL;
+    ne*=t->dims[i];
+  }
+  u64 sz=ggml_type_size(t->type,ne);
+  u64 start=g->data_off+t->offset;
+  if(start<g->data_off || (sz && start>SIZE_MAX-sz) || start+sz>g->size) return NULL;
+  return g->data+start;
+}
 GTensor *gguf_by_name(GGUF *g, const char *name){
   for(u64 i=0;i<g->n_tensors;i++)
     if(!strcmp(g->t[i].name,name)) return &g->t[i];
