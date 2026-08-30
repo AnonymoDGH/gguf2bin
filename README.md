@@ -16,16 +16,15 @@ Weights are memory-mapped: your real RAM budget is **KV cache + activations + to
 Measured on Intel i5-6200U · 2C/4T · DDR3L dual-channel (~9.4 GB/s bus ceiling).
 Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 
-| Model | Weights (mmap) | Runtime RAM | tok/s |
-|---|---|---|---|
-| **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 507 MB | **24–28** |
-| **LFM2.5-1.2B** Q4_0S | 569 MB | 598 MB | **16.1** |
-| SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** |
+| Model | Weights (mmap) | Runtime RAM | decode | prefill |
+|---|---|---|---|---|
+| **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** | 7.8 |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | **25.3** | **47.9** |
+| **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
+| Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
+| SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-At ~27 tok/s the decode streams ~9 GB/s — essentially pinned to the DDR3L bus ceiling.
-Batched prefill runs at the kernel compute ceiling (~27 GMAC/s).
-Prefill Qwen3-0.6B: 46.6 tok/s.
+Measured 2026-08-30 on the same i5-6200U box with `bench -n 32 --prefill 256` (min of 3). At ~25 tok/s the decode streams ~9 GB/s — pinned to the DDR3L bus ceiling. Batched prefill hits the kernel compute ceiling (~27 GMAC/s).
 
 ## 🚀 Quick start
 
