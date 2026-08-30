@@ -165,6 +165,8 @@ static void free_rt(Model *m){
   free(m->ffn_stats); m->ffn_stats=NULL;
   free(m->conv_state); m->conv_state=NULL;
   free(m->ssm_st); m->ssm_st=NULL;
+  /* mv_table persiste entre ctx switches para conservar historia predictiva */
+  // no free mv_table aquí — se libera en model_free
   if(m->use_swap && m->swap_view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
@@ -236,6 +238,14 @@ static int alloc_rt(Model *m, i32 ctx){
     m->ssm_st=calloc(ns,sizeof(f32));
     m->conv_state=calloc(nc,sizeof(f32));
     if(!m->ssm_st||!m->conv_state){ free_rt(m); return -1; }
+  }
+  /* Swapeculative MV table */
+  if(!m->mv_table){
+    m->mv_table=calloc(MV_TABLE_SIZE, sizeof(*m->mv_table));
+    if(!m->mv_table){ free_rt(m); return -1; }
+    for(int i=0;i<MV_TABLE_SIZE;i++){ m->mv_table[i].token=-1; m->mv_table[i].pred=1; }
+    m->mv_seq=0; m->mv_hits=m->mv_misses=m->mv_skips=0;
+    // mv_ratio ya viene de CLI, default 0 si no se setea
   }
   return 0;
 }
@@ -578,6 +588,12 @@ void model_free(Model *m){
   free(m->slots);
   model_unmap(m);
   free_rt(m);
+  free(m->mv_table); m->mv_table=NULL;
+  if(m->mv_misses + m->mv_hits > 0){
+    fprintf(stderr,"[mv] hits=%llu misses=%llu skips=%llu hitrate=%.1f%%\n",
+      (unsigned long long)m->mv_hits,(unsigned long long)m->mv_misses,(unsigned long long)m->mv_skips,
+      100.0*(double)m->mv_hits/(double)(m->mv_hits+m->mv_misses));
+  }
   free(m->swap_path); m->swap_path=NULL;
   free(m->src_path); m->src_path=NULL;
   if(m->tok){ tok_free(m->tok); free(m->tok); m->tok=NULL; }
@@ -805,6 +821,37 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
 
 static i32 max_row_scratch(Model *m){ return m->c.vocab>m->c.dim?m->c.vocab:m->c.dim; }
 
+/* ── Swapeculative MV: predictor 2-bit + tabla hash de Motion Vectors ── */
+static inline u32 mv_hash(i32 token){ return ((u32)token * 2654435761u) & (MV_TABLE_SIZE-1); }
+static inline int mv_should_skip(Model *m, i32 token){
+  if(!m->mv_table) return 0;
+  u32 h=mv_hash(token);
+  return m->mv_table[h].token==token && m->mv_table[h].pred >= 2;
+}
+static inline void mv_update(Model *m, i32 token, int hit){
+  if(!m->mv_table) return;
+  u32 h=mv_hash(token);
+  if(m->mv_table[h].token != token){
+    m->mv_table[h].token=token; m->mv_table[h].pos=m->mv_seq; m->mv_table[h].pred= hit?2:1;
+  } else {
+    if(hit){ if(m->mv_table[h].pred < 3) m->mv_table[h].pred++; m->mv_hits++; }
+    else { if(m->mv_table[h].pred > 0) m->mv_table[h].pred--; m->mv_misses++; }
+    m->mv_table[h].pos=m->mv_seq;
+  }
+  m->mv_seq++;
+}
+static inline int mv_tunable_skip(Model *m, i32 L, i32 pos, i32 token){
+  if(getenv("G2BX_MV_DISABLE")) return 0;
+  float r = m->mv_ratio;
+  if(r <= 0.001f) return 0;
+  if(pos < 4) return 0;
+  // hash distribuye capas uniformemente según ratio
+  int roll = (int)(( (u32)L * 2654435761u + (u32)pos * 97u + (u32)token) % 100);
+  if(roll < (int)(r*100.0f)) return 1;
+  if(mv_should_skip(m, token)) return 1;
+  return 0;
+}
+
 /* ── qwen35: gated delta net + atención completa cada N capas (CPU secuencial) ──
    Ref: llama.cpp src/models/qwen35.cpp + ggml_gated_delta_net (ops.cpp). */
 #define HY_NV_MAX 256
@@ -991,6 +1038,10 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
         fprintf(stderr,"[C] q0 %g k0 %g v0 %g dot %g\n", qkv[0], qkv[kdim], qkv[2*kdim], dot);
       }
       { /* recurrencia delta rule por v-head; out → wqo (libre aquí) */
+        int mv_skip = 0;
+        if(mv_tunable_skip(m, L, pos, token)){
+          mv_skip=1; m->mv_skips++;
+        }
         f32 *o=gdno; /* reuso: activado qkv ya consumido al final del bucle */
         const f32 *qc=qkv, *kc=qkv+kdim, *vc=qkv+2*kdim;
         const f32 sc=1.f/sqrtf((f32)dv);
@@ -1000,6 +1051,17 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
           const f32 *vh=vc+(size_t)h*dv;
           f32 *S=m->ssm_st+((size_t)recL*nv+(size_t)h)*(size_t)dv*(size_t)dv;
           f32 dec=expf(g_v[h]);
+          if(mv_skip){
+            // Swapeculative: solo decay + output, salta delta update (2/3 del costo)
+            for(i32 j=0;j<dv;j++){ f32 *sr=S+(size_t)j*dv; for(i32 i=0;i<dv;i++) sr[i]*=dec; }
+            f32 *oh=o+(size_t)h*dv;
+            for(i32 j=0;j<dv;j++){
+              const f32 *sr=S+(size_t)j*dv; f32 sum=0;
+              for(i32 i=0;i<dv;i++) sum+=sr[i]*qh[i];
+              oh[j]=sum*sc;
+            }
+            continue;
+          }
           f32 delta[512];
           if((i32)dv>512){ fprintf(stderr,"fwd hybrid: dv=%d >512\n",dv); return -1; }
           for(i32 j=0;j<dv;j++){ f32 *sr=S+(size_t)j*dv; for(i32 i=0;i<dv;i++) sr[i]*=dec; }
@@ -1058,9 +1120,17 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
 
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
+  if(m->mv_table){
+    // Swapeculative: entrena predictor con token actual (hit si ya visto)
+    u32 h=mv_hash(token);
+    int seen = (m->mv_table[h].token==token);
+    mv_update(m, token, seen?1:0);
+    if(seen) {} else { /* first time miss counted in mv_update */ }
+  }
   if(!want_logits||!logits) return 0;
   Slot *out=slot_get(m,R_OUTPUT,-1);
   if(!out) out=emb;
+  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return 0;
   matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
   return 0;
 }
@@ -1184,26 +1254,42 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
     Slot *fn=slot_get(m,R_FFN_NORM,L);
     load_vec_f32(m,fn,row,dim); rmsnorm(xb,x,row,dim,c->eps);
 
-    Slot *wg=slot_get(m,R_FFN_GATE,L);
-    Slot *wu=slot_get(m,R_FFN_UP,L);
-    Slot *wd=slot_get(m,R_FFN_DOWN,L);
-    if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
-    /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
-    if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
-      matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
-    else {
-      matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
-      matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
+    int mv_skip_ffn = 0;
+    if(mv_tunable_skip(m, L, pos, token)){
+      mv_skip_ffn=1; m->mv_skips++;
     }
-    silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
-    if(m->collect_stats && m->ffn_stats){
-      f32 *st=m->ffn_stats+(size_t)L*hid;
-      for(i32 i=0;i<hid;i++) st[i]+=fabsf(hb[i]);
+    if(!mv_skip_ffn){
+      Slot *wg=slot_get(m,R_FFN_GATE,L);
+      Slot *wu=slot_get(m,R_FFN_UP,L);
+      Slot *wd=slot_get(m,R_FFN_DOWN,L);
+      if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
+      /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
+      if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
+        matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
+      else {
+        matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
+        matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
+      }
+      silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
+      if(m->collect_stats && m->ffn_stats){
+        f32 *st=m->ffn_stats+(size_t)L*hid;
+        for(i32 i=0;i<hid;i++) st[i]+=fabsf(hb[i]);
+      }
+      matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
+      for(i32 i=0;i<dim;i++) x[i]+=xb[i];
+    } else {
+      // skip FFN: x ya tiene residual de atención, no se suma FFN
+      if(m->collect_stats && m->ffn_stats){
+        // aún cuenta como 0 para calib
+      }
     }
-    matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
-    for(i32 i=0;i<dim;i++) x[i]+=xb[i];
   }
 
+  if(m->mv_table){
+    u32 h=mv_hash(token);
+    int seen = (m->mv_table[h].token==token);
+    mv_update(m, token, seen?1:0);
+  }
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
   if(!want_logits || !logits) return; /* prefill: saltar logits vocab×dim (carísimo) */

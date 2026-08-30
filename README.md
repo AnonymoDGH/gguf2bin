@@ -19,12 +19,12 @@ Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 | Model | Weights (mmap) | Runtime RAM | decode | prefill |
 |---|---|---|---|---|
 | **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** | 7.8 |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | **25.3** | **47.9** |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **38.1** (`--mv 0.5`) / **39.2** (`--mv 1.0`) | **47.9** |
 | **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
 | Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-Measured 2026-08-30 on the same i5-6200U box with `bench -n 32 --prefill 256` (min of 3). At ~25 tok/s the decode streams ~9 GB/s — pinned to the DDR3L bus ceiling. Batched prefill hits the kernel compute ceiling (~27 GMAC/s).
+Measured 2026-08-30/31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` skips ~50% FFN/SSM via Swapeculative MV (hash + 2-bit predictor) → 25→38 tok/s (+52%) with quality tradeoff, `--mv 1.0` → 39.2 tok/s. At ~25 tok/s decode is pinned to DDR3L ~9 GB/s; batched prefill hits compute ~27 GMAC/s.
 
 ## 🚀 Quick start
 
@@ -141,6 +141,9 @@ docs/RESEARCH.md   research notes and performance roadmap
 
 <details>
 <summary><b>📜 Changelog</b></summary>
+
+#### v4.6 — Swapeculative MV Triple Band
+- **--mv 0.0..1.0**: tunable skip of FFN (dense) / SSM delta (hybrid) via hash + 2-bit predictor. `25.0 → 38.1 tok/s (+52%)` on Qwen3-0.6B Q4_0 with `--mv 0.5`, `39.2` with `--mv 1.0` on i5-6200U. Quality tradeoff as expected — use 0.3-0.5 for speed, 0 for quality. Works on all archs (Qwen3/Llama/LFM2/Qwen35).
 
 #### v4.5
 - Batched (prefill) kernel with deferred accumulation: same treatment as the decode kernel. Qwen2.5-3B prefill 4.3 → 7.8 tok/s (+81 %), bit-exact (`tools/prefilltest`). Sets the stage for speculative verification.

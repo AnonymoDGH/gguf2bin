@@ -104,7 +104,8 @@ static void usage(const char *a0){
     "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
     "      --fast             exprime todo: prioridad alta, max hilos, sin swap\n"
     "      --threads N        numero de cores OpenMP (def: todos)\n"
-    "      --drop N           omite los N bloques menos influyentes (ShortGPT)\n\n"
+    "      --drop N           omite los N bloques menos influyentes (ShortGPT)\n"
+    "      --mv F             Swapeculative 0.0..1.0 skip FFN/SSM\n\n"
     "bench extra:\n"
     "      --prefill N        mide tok/s de procesamiento de prompt (sin logits)\n\n"
     "Ejemplos:\n"
@@ -379,7 +380,7 @@ static int cmd_run(int argc, char **argv){
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
   int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0;
+  u64 seed=0; int ndrop=0; float mv_ratio=0.f;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
@@ -398,6 +399,7 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
@@ -408,10 +410,12 @@ static int cmd_run(int argc, char **argv){
     }
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(mv_ratio>0) m.mv_ratio=mv_ratio;
   if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", m.mv_ratio);
   if(ndrop>0 && m.tok){
     i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
@@ -483,7 +487,7 @@ static int cmd_ppl(int argc, char **argv){
   const char *path=argv[2];
   const char *file=NULL; i32 maxtok=4096;
   i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  int ndrop=0;
+  int ndrop=0; float mv_ratio=0.f;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
     else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
@@ -494,8 +498,10 @@ static int cmd_ppl(int argc, char **argv){
     else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(mv_ratio>0) m.mv_ratio=mv_ratio;
   { const char *sw = swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(nthr>0) set_threads(nthr);
@@ -568,7 +574,7 @@ static int cmd_chat(int argc, char **argv){
   int no_sys=0;
   int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0;
+  u64 seed=0; int ndrop=0; float mv_ratio=0.f;
   for(int i=3;i<argc;i++){
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -591,10 +597,12 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(path,&m)) return 1;
+  if(mv_ratio>0) m.mv_ratio=mv_ratio;
   if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", m.mv_ratio);
   if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
     if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
@@ -753,7 +761,7 @@ static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   int gpu=0;
-  i32 prefill_n=0; u64 seed=0; int ndrop=0;
+  i32 prefill_n=0; u64 seed=0; int ndrop=0; float mv_ratio=0.f;
   for(int i=3;i<argc;i++){
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -766,13 +774,16 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(argv[2],&m)) return 1;
+  if(mv_ratio>0) m.mv_ratio=mv_ratio;
   if(gpu && !vk_dual_start(&m,argv[2])) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
+  if(m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", m.mv_ratio);
   if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
     if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }

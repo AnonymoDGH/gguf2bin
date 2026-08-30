@@ -143,6 +143,13 @@ typedef struct {
   /* recolección de estadísticas FFN para poda calibrada */
   u8 collect_stats;
   f32 *ffn_stats;             /* [n_layers x hidden]: Σ|silu(g)·u| por neurona */
+  /* Swapeculative MV — Triple Band Predictivo */
+#define MV_TABLE_SIZE 8192
+#define MV_PRED_STATES 4
+  struct { i32 token; i32 pos; u8 pred; u8 _pad[3]; } *mv_table; /* [MV_TABLE_SIZE] */
+  i32 mv_seq; /* contador de tokens para MV */
+  u64 mv_hits, mv_misses, mv_skips;
+  float mv_ratio; /* --mv 0.0..1.0 tasa de skip (0=off, 0.5=50% FFN/SSM) */
   /* buffers del prefill batcheado ([B][...]) */
   i32 pf_B;
   f32 *pf_pool; /* base única del pool (lo único que se libera) */
