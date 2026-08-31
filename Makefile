@@ -4,7 +4,7 @@ CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -
 LDFLAGS ?= -lm -fopenmp
 
 SRC = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
-      src/l5_model.c src/l6_token.c src/main.c src/l7_vulkan.c
+      src/l5_model.c src/l6_token.c src/main.c src/l7_vulkan.c src/l8_cyber.c
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)
   EXE = $(BIN).exe

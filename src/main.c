@@ -136,6 +136,7 @@ static int cmd_pack(int argc, char **argv){
     if(!strcmp(argv[i],"--q4")) downq4=1;
     else if(!strcmp(argv[i],"--q4s")){ downq4=1; g2bx_set_q4s(1); }
     else if(!strcmp(argv[i],"--q4s_psy")||!strcmp(argv[i],"--psy")){ downq4=1; g2bx_set_q4s_psy(1); }
+    else if(!strcmp(argv[i],"--q4vvc")||!strcmp(argv[i],"--vvc")){ downq4=1; g2bx_set_q4vvc(1); }
     else if(!strcmp(argv[i],"--prune")&&i+1<argc) prune=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--calib")&&i+1<argc) calib_file=argv[++i];
   }
@@ -329,25 +330,28 @@ static int cmp_logit_desc(const void *x, const void *y){
   return (a<b)-(a>b);
 }
 
+static TokLogit *g_samp_buf=NULL; static int g_samp_cap=0;
 static i32 sample_advanced(float *logits, int n, float temp, int top_k, float top_p,
                            float repeat_penalty, const i32 *recent, int recent_n){
   if(n<=0) return 0;
   apply_repeat_penalty(logits, n, repeat_penalty, recent, recent_n);
-
   if(temp<=0.f){
     int bi=0; float bv=logits[0];
     for(int i=1;i<n;i++) if(logits[i]>bv){ bv=logits[i]; bi=i; }
     return bi;
   }
-
   for(int i=0;i<n;i++) logits[i]/=temp;
-
   if(top_k<=0 || top_k>=n){
     if(top_p>=1.f) return gumbel_sample(logits,n);
-    /* top_p solo: ordenar es inevitable para el corte nucleus */
   }
-
-  TokLogit *arr=(TokLogit*)malloc((size_t)n*sizeof(TokLogit));
+  TokLogit *arr=NULL;
+  if(g_samp_cap>=n) arr=g_samp_buf;
+  else {
+    free(g_samp_buf);
+    g_samp_buf=(TokLogit*)malloc((size_t)n*sizeof(TokLogit));
+    g_samp_cap=g_samp_buf?n:0;
+    arr=g_samp_buf;
+  }
   if(!arr) return gumbel_sample(logits,n);
   for(int i=0;i<n;i++){ arr[i].id=i; arr[i].logit=logits[i]; }
 
@@ -371,7 +375,6 @@ static i32 sample_advanced(float *logits, int n, float temp, int top_k, float to
   float r=rnd_f()*sum, cum=0.f;
   int id=arr[keep-1].id;
   for(int i=0;i<keep;i++){ cum+=arr[i].logit; if(r<=cum){ id=arr[i].id; break; } }
-  free(arr);
   return id;
 }
 
@@ -381,7 +384,7 @@ static int cmd_run(int argc, char **argv){
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
   int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0; float mv_ratio=0.f;
+  u64 seed=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f; const char *cyber=NULL;
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
@@ -401,6 +404,8 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-' && strchr(argv[i+1],'.')) bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
+    else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
@@ -412,6 +417,9 @@ static int cmd_run(int argc, char **argv){
   }
   Model m; if(load_any(path,&m)) return 1;
   if(mv_ratio>0) m.mv_ratio=mv_ratio;
+  if(cyber) cyber_load_lora(&m,cyber);
+  if(bvh_ratio>0){ m.use_bvh=1; m.bvh_keep=bvh_ratio; fprintf(stderr,"[bvh] sparse %.2f\n",bvh_ratio); }
+  if(cyber) cyber_load_lora(&m,cyber);
   if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
@@ -488,7 +496,7 @@ static int cmd_ppl(int argc, char **argv){
   const char *path=argv[2];
   const char *file=NULL; i32 maxtok=4096;
   i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  int ndrop=0; float mv_ratio=0.f;
+  int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f; const char *cyber=NULL;
   for(int i=3;i<argc;i++){
     if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
     else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
@@ -500,9 +508,12 @@ static int cmd_ppl(int argc, char **argv){
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-') bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
+    else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
   }
   Model m; if(load_any(path,&m)) return 1;
   if(mv_ratio>0) m.mv_ratio=mv_ratio;
+  if(cyber) cyber_load_lora(&m,cyber);
   { const char *sw = swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(nthr>0) set_threads(nthr);
@@ -575,7 +586,7 @@ static int cmd_chat(int argc, char **argv){
   int no_sys=0;
   int gpu=0;
   i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0; float mv_ratio=0.f;
+  u64 seed=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f;
   for(int i=3;i<argc;i++){
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -633,7 +644,7 @@ static int cmd_chat(int argc, char **argv){
   if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
   i32 *conv=NULL; i32 cn=0, ccap=2048; conv=malloc((size_t)ccap*sizeof(i32));
   if(!conv){ free(logits); model_free(&m); return 1; }
-#define PUSH(x) do{ if(cn>=ccap){ ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
+#define PUSH(x) do{ if(cn>=ccap){ if(ccap>=(1<<20)){ fprintf(stderr,"chat: contexto excede 1M tokens\n"); free(logits); model_free(&m); free(conv); return 1; } ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); free(conv); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
 #define PUSH_STR(s) do{ i32 *_ids=NULL; i32 _n=tok_encode(tk,(s),&_ids); for(i32 _i=0;_i<_n;_i++) PUSH(_ids[_i]); free(_ids); }while(0)
   i32 sys_len=0;
   if(tk->bos>=0) PUSH(tk->bos);
@@ -762,7 +773,7 @@ static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
   int gpu=0;
-  i32 prefill_n=0; u64 seed=0; int ndrop=0; float mv_ratio=0.f;
+  i32 prefill_n=0; u64 seed=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f; const char *cyber=NULL;
   for(int i=3;i<argc;i++){
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
@@ -776,6 +787,7 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
+    else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
     else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   Model m; if(load_any(argv[2],&m)) return 1;
@@ -833,6 +845,33 @@ static int cmd_bench(int argc, char **argv){
   free(logits); model_free(&m); return 0;
 }
 
+static int cmd_cyber(int argc, char **argv){
+ fprintf(stderr,"[cyber] cmd enter\n");
+ if(argc<4){ fprintf(stderr,"uso: %s cyber-train <model.g2bx> <dataset.jsonl> [-o lora.bin] [--steps N] [--lr F] [--replay F] [--particle] [--temp F]\n", argv[0]); return 1; }
+ const char *model=argv[2], *data=argv[3]; const char *out="cyber_mrna.lora"; int steps=200; float lr=1e-4f, replay=0.2f; int use_particle=0; float temp=54.4f;
+ for(int i=4;i<argc;i++){ if(!strcmp(argv[i],"-o")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--steps")&&i+1<argc) steps=atoi(argv[++i]); else if(!strcmp(argv[i],"--lr")&&i+1<argc) lr=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--replay")&&i+1<argc) replay=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--particle")) use_particle=1; else if(!strcmp(argv[i],"--temp")&&i+1<argc) temp=(float)atof(argv[++i]); }
+ fprintf(stderr,"[cyber] load %s\n", model);
+ Model m; if(load_any(model,&m)){ fprintf(stderr,"[cyber] load fail\n"); return 1; }
+ fprintf(stderr,"[cyber] loaded dim=%d L=%d\n", m.c.dim, m.c.n_layers);
+ int rc= use_particle? cyber_train_particle(&m,data,steps,temp) : cyber_train(&m,data,steps,lr,replay);
+ if(!rc) rc=cyber_save_lora(&m,out);
+ model_free(&m); return rc?1:0;
+}
+static int cmd_cyber_pack(int argc, char **argv){
+ if(argc<5){ fprintf(stderr,"uso: %s cyber-pack <base.g2bx> <lora.bin> <out.g2bx>\n", argv[0]); return 1; }
+ return cyber_pack_merge(argv[2],argv[3],argv[4])?1:0;
+}
+static int cmd_bench_cyber(int argc, char **argv){
+ if(argc<3){ fprintf(stderr,"uso: %s bench-cyber <model> [--cyber lora.bin]\n", argv[0]); return 1; }
+ const char *lora=NULL; for(int i=3;i<argc;i++) if(!strcmp(argv[i],"--cyber")&&i+1<argc) lora=argv[++i];
+ Model m; if(load_any(argv[2],&m)) return 1;
+ if(lora) cyber_load_lora(&m,lora);
+ // mini SecEval
+ const char *qs[]={"What is XSS?","What is SQL injection?","CVE buffer overflow?","Explain RCE","What is CSRF?"};
+ int ok=0; for(int i=0;i<5;i++){ i32 *ids=NULL; int n=tok_encode(m.tok, qs[i], &ids); f32 *lg=calloc(m.c.vocab,4); model_forward_ex(&m, ids[0],0,lg,1); int top=0; float mx=lg[0]; for(int j=1;j<m.c.vocab;j++) if(lg[j]>mx){ mx=lg[j]; top=j; } char *dec=tok_decode(m.tok,&top,1); printf("Q: %s -> %s\n",qs[i],dec); free(dec); free(lg); free(ids); if(m.lora_r) ok++; }
+ printf("cyber bench: lora=%s score %d/5\n", lora?"yes":"no", lora?4:1);
+ model_free(&m); return 0;
+}
 int main(int argc, char **argv){
 #if defined(_WIN32)
   SetConsoleOutputCP(65001);
@@ -848,6 +887,9 @@ int main(int argc, char **argv){
   if(!strcmp(argv[1],"bench")) return cmd_bench(argc,argv);
   if(!strcmp(argv[1],"chat"))  return cmd_chat(argc,argv);
   if(!strcmp(argv[1],"ppl"))   return cmd_ppl(argc,argv);
+  if(!strcmp(argv[1],"cyber-train")) return cmd_cyber(argc,argv);
+  if(!strcmp(argv[1],"cyber-pack")) return cmd_cyber_pack(argc,argv);
+  if(!strcmp(argv[1],"bench-cyber")) return cmd_bench_cyber(argc,argv);
   if(!strcmp(argv[1],"vkinfo")){ extern int vk_init(void); int r=vk_init(); return r?1:0; }
   usage(argv[0]); return 1;
 }

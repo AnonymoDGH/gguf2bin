@@ -161,13 +161,11 @@ static u8 *convert_tensor_q4_0s(const u8 *src, u32 srctype, u64 ne){
   if(!out) return NULL;
   f32 blk[256];
   for(u64 sb=0;sb<nsb;sb++){
-    /* dequantizar el superbloque segun el tipo fuente */
     u64 bs=ggml_block_size(srctype);
     f32 amax=0;
     for(u64 j=0;j<256;j+=bs){
-      gguf_dequant(srctype,(u8*)(src+ (size_t)((sb*256+j)/bs)*ggml_type_bytes(srctype)),blk+(j==0?0:j),bs);
+      gguf_dequant(srctype,(u8*)(src+ (size_t)((sb*256+j)/bs)*ggml_type_bytes(srctype)),blk+j,bs);
     }
-    /* re-dequant correcto: blk[] ya lleno por trozos arriba solo si bs<=256 */
     for(int i=0;i<256;i++){ f32 a=fabsf(blk[i]); if(a>amax) amax=a; }
     f32 d=amax/7.0f; if(d<=0) d=1e-9f;
     u16 sd=f32_to_half(d); memcpy(out+sb*130,&sd,2);
@@ -235,9 +233,37 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   }
   return out;
 }
-static int g_force_q4s=0, g_force_q4s_psy=0;
+static int g_force_q4s=0, g_force_q4s_psy=0, g_force_q4vvc=0;
 void g2bx_set_q4s(int v){ g_force_q4s=v; }
 void g2bx_set_q4s_psy(int v){ g_force_q4s_psy=v; }
+void g2bx_set_q4vvc(int v){ g_force_q4vvc=v; }
+static u8 *convert_tensor_q4_vvc(const u8 *src, u32 srctype, u64 ne){
+  if(ne%256) return NULL;
+  u64 nsb=ne/256;
+  u8 *out=malloc((size_t)(nsb*98));
+  if(!out) return NULL;
+  f32 blk[256];
+  for(u64 sb=0; sb<nsb; sb++){
+    u64 bs=ggml_block_size(srctype);
+    for(u64 j=0;j<256;j+=bs) gguf_dequant(srctype,(u8*)(src+(size_t)((sb*256+j)/bs)*ggml_type_bytes(srctype)),blk+j,bs);
+    f32 amax=0; for(int i=0;i<256;i++){ f32 a=fabsf(blk[i]); if(a>amax) amax=a; }
+    f32 d=amax/4.0f; if(d<=0) d=1e-9f;
+    u16 sd=f32_to_half(d); memcpy(out+sb*98,&sd,2);
+    u8 q4[256];
+    for(int i=0;i<256;i++){
+      int q=(int)lroundf(blk[i]/d)+8; if(q<0)q=0; else if(q>15)q=15;
+      q4[i]=(u8)q;
+    }
+    memset(out+sb*98+2,0,96);
+    for(int i=0;i<256;i++){
+      int v=q4[i]-5; if(v<0)v=0; else if(v>7)v=7;
+      int bpos=i*3, byte=bpos>>3, bit=bpos&7;
+      out[sb*98+2+byte]|= (u8)((v&7)<<bit);
+      if(bit>5) out[sb*98+2+byte+1]|= (u8)((v>> (8-bit))&7);
+    }
+  }
+  return out;
+}
 int g2bx_pack(const char *gguf_path, const char *out_path){
   return g2bx_pack_prune(gguf_path, out_path, 0, 0.f);
 }
@@ -428,14 +454,17 @@ skip_prune:
       if(slots[i].type==T_F32 || slots[i].type==T_F16) conv = 1;
       else if(downq4 && slots[i].type!=T_Q4_0) conv = 1;
     }
-    if(g_force_q4s_psy && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S_PSY && ne_arr[i]%256==0){
+    if(g_force_q4vvc && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_VVC && ne_arr[i]%256==0){
+      u8 *qv=convert_tensor_q4_vvc(src_ptr[i], slots[i].type, ne_arr[i]);
+      if(qv){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qv; src_ptr[i]=qv; slots[i].type=T_Q4_VVC; slots[i].nbytes=(u32)(ne_arr[i]/256*98); src_sz[i]=slots[i].nbytes; }
+    } else if(g_force_q4s_psy && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S_PSY && ne_arr[i]%256==0){
       u8 *qs=convert_tensor_q4_0s_psy(src_ptr[i], slots[i].type, ne_arr[i]);
-      if(qs){ conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S_PSY; slots[i].nbytes=(u32)(ne_arr[i]/256*132); src_sz[i]=slots[i].nbytes; }
+      if(qs){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S_PSY; slots[i].nbytes=(u32)(ne_arr[i]/256*132); src_sz[i]=slots[i].nbytes; }
     } else if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && ne_arr[i]%256==0){
       u8 *qs=convert_tensor_q4_0s(src_ptr[i], slots[i].type, ne_arr[i]);
-      if(qs){ conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S; slots[i].nbytes=(u32)(ne_arr[i]/256*130); src_sz[i]=slots[i].nbytes; }
+      if(qs){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S; slots[i].nbytes=(u32)(ne_arr[i]/256*130); src_sz[i]=slots[i].nbytes; }
     }
-    if(conv && slots[i].type!=T_Q4_0S && slots[i].type!=T_Q4_0S_PSY){
+    if(conv && slots[i].type!=T_Q4_0S && slots[i].type!=T_Q4_0S_PSY && slots[i].type!=T_Q4_VVC){
       u8 *q4=convert_tensor_q4_0(src_ptr[i], slots[i].type, ne_arr[i]);
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }

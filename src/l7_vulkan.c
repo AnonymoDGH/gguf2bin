@@ -503,7 +503,7 @@ int vk_dual_active(void){ return g_state==1; }
 static u64 g2bx_blob_file_off(const Model *m){
   if(m->use_mmap && m->map_view && m->data)
     return (u64)((const u8*)m->data - (const u8*)m->map_view);
-  return 8ull + (u64)sizeof(ModelCfg) + 4ull + (u64)m->n_slots * (u64)sizeof(Slot);
+  return 4ull+2ull+1ull+1ull+(u64)sizeof(ModelCfg)+4ull+(u64)m->n_slots*(u64)sizeof(Slot);
 }
 int vk_dual_start(Model *m,const char *model_path){
   if(g_state!=-1) return g_state==1;

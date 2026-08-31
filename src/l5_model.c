@@ -18,11 +18,49 @@
 
 #define G2BX_MAGIC "G2BX"
 #define ALIGN64(x) (((x)+63ull)&~63ull)
+#if defined(_OPENMP)
+#include <omp.h>
+#define L5_TLS_MAX 128
+static __thread f32 *tls_krow=NULL; static __thread f32 *tls_vrow=NULL; static __thread i32 tls_cap=0;
+static inline void tls_kv_ensure(i32 hd){
+  if(tls_cap>=hd) return;
+  free(tls_krow); free(tls_vrow);
+  tls_krow=(f32*)malloc((size_t)hd*sizeof(f32)); tls_vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+  tls_cap=(tls_krow&&tls_vrow)?hd:0;
+}
+#else
+static f32 *tls_krow=NULL; static f32 *tls_vrow=NULL; static i32 tls_cap=0;
+static inline void tls_kv_ensure(i32 hd){
+  if(tls_cap>=hd) return;
+  free(tls_krow); free(tls_vrow);
+  tls_krow=(f32*)malloc((size_t)hd*sizeof(f32)); tls_vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+  tls_cap=(tls_krow&&tls_vrow)?hd:0;
+}
+#endif
 #if defined(_WIN32)
 #define fseek64 _fseeki64
 #else
 #define fseek64(f, off, whence) fseeko(f, (off_t)(off), whence)
 #endif
+static inline int bvh_keep_pos(const Model *m, i32 pos, i32 t){
+  if(!m->use_bvh) return 1;
+  if(t >= pos-512) return 1;
+  if((t & 15)==0) return 1;
+  if(m->bvh_keep>0.2f && (t & 7)==0) return 1;
+  return 0;
+}
+static inline void ob_update(Model *m, f32 *logits){
+  if(!m->use_ob||!logits) return;
+  f32 mx1=-1e30f,mx2=-1e30f;
+  for(int i=0;i<m->c.vocab;i++){ f32 v=logits[i]; if(v>mx1){ mx2=mx1; mx1=v; } else if(v>mx2) mx2=v; }
+  m->ob_last_spread=mx1-mx2;
+}
+static inline int ob_should_skip(Model *m){
+  if(!m->use_ob) return 0;
+  return m->ob_last_spread > m->ob_thresh;
+}
+static inline f32 hdr_tonemap(f32 x){ return x/(1.f+fabsf(x)); }
+static inline f32 hdr_inv_tonemap(f32 y){ return y/(1.f-fabsf(y)); }
 
 u8 *slot_ptr(Model *m, Slot *s){
   if(!m||!s||!m->data) return NULL;
@@ -594,6 +632,10 @@ void model_free(Model *m){
       (unsigned long long)m->mv_hits,(unsigned long long)m->mv_misses,(unsigned long long)m->mv_skips,
       100.0*(double)m->mv_hits/(double)(m->mv_hits+m->mv_misses));
   }
+  if(m->lora_r){
+   for(int L=0; L<m->c.n_layers; L++){ free(m->loraA_q[L]); free(m->loraB_q[L]); free(m->loraA_v[L]); free(m->loraB_v[L]); free(m->loraA_gate[L]); free(m->loraB_gate[L]); free(m->loraM_q[L]); free(m->loraM_v[L]); free(m->loraM_gate[L]); free(m->galore_m[L]); free(m->galore_v[L]); }
+   free(m->loraA_q); free(m->loraB_q); free(m->loraA_v); free(m->loraB_v); free(m->loraA_gate); free(m->loraB_gate); free(m->loraM_q); free(m->loraM_v); free(m->loraM_gate); free(m->galore_m); free(m->galore_v);
+  }
   free(m->swap_path); m->swap_path=NULL;
   free(m->src_path); m->src_path=NULL;
   if(m->tok){ tok_free(m->tok); free(m->tok); m->tok=NULL; }
@@ -723,8 +765,18 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
         #pragma omp parallel if(ngrp>=2 && pos>=16)
 #endif
         {
-          f32 *kr=(f32*)malloc((size_t)hd*sizeof(f32));
-          f32 *vr=(f32*)malloc((size_t)hd*sizeof(f32));
+#if defined(_OPENMP)
+          #pragma omp parallel if(ngrp>=2 && pos>=16)
+#endif
+          {
+            tls_kv_ensure(hd);
+            f32 *kr=tls_krow; f32 *vr=tls_vrow;
+            if(!kr||!vr){
+#if defined(_OPENMP)
+              #pragma omp critical
+#endif
+              { tls_kv_ensure(hd); kr=tls_krow; vr=tls_vrow; }
+            }
 #if defined(_OPENMP)
           #pragma omp for schedule(static)
 #endif
@@ -743,7 +795,7 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
                 fma_hd(q+(size_t)h*hd,vr,att[(size_t)h*ctx+t],hd);
             }
           }
-          free(kr); free(vr);
+          }
         }
       }
       Slot *wo=slot_get(m,R_ATTN_O,L);
@@ -947,8 +999,7 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
         #pragma omp parallel if(ngrp>=2 && pos>=16)
 #endif
         {
-          f32 *krow=(f32*)malloc((size_t)hd*sizeof(f32));
-          f32 *vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+          tls_kv_ensure(hd); f32 *krow=tls_krow; f32 *vrow=tls_vrow;
 #if defined(_OPENMP)
           #pragma omp for schedule(static)
 #endif
@@ -967,7 +1018,6 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
                 fma_hd(q+(size_t)h*hd,vrow,att[(size_t)h*ctx+t],hd);
             }
           }
-          free(krow); free(vrow);
         }
       }
       /* gate sigmoide sobre la salida de atención */
@@ -1181,7 +1231,11 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
     if(require_slot(wq,"attn_q",L)||require_slot(wk,"attn_k",L)||require_slot(wv,"attn_v",L)) return;
     /* Fusion Q+K+V: solo si los slots son contiguos y del mismo tipo
        (los offsets densos lo permiten; con padding ALIGN64 no). */
-    if(wq->type==wk->type && wk->type==wv->type
+    if(m->lora_r){
+      matmul_q(q,xb,slot_ptr(m,wq),wq->type,dim,nq,row); lora_add(q,xb,m->loraA_q[L],m->loraB_q[L],m->loraM_q[L],dim,nq,m->lora_r);
+      matmul_q(k,xb,slot_ptr(m,wk),wk->type,dim,nkv,row);
+      matmul_q(v,xb,slot_ptr(m,wv),wv->type,dim,nkv,row); lora_add(v,xb,m->loraA_v[L],m->loraB_v[L],m->loraM_v[L],dim,nkv,m->lora_r);
+    } else if(wq->type==wk->type && wk->type==wv->type
        && slot_ptr(m,wk)==slot_ptr(m,wq)+wq->nbytes
        && slot_ptr(m,wv)==slot_ptr(m,wk)+wk->nbytes)
       matmul_q(q,xb,slot_ptr(m,wq),wq->type,dim,nq+nkv+nkv,row);
@@ -1219,14 +1273,14 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
       #pragma omp parallel if(ngrp>=2 && pos>=16)
 #endif
       {
-        f32 *krow=(f32*)malloc((size_t)hd*sizeof(f32));
-        f32 *vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+          tls_kv_ensure(hd); f32 *krow=tls_krow; f32 *vrow=tls_vrow;
 #if defined(_OPENMP)
         #pragma omp for schedule(static)
 #endif
         for(i32 g=0; g<ngrp; g++){
           i32 h0=g*group, h1=h0+group; if(h1>c->n_heads) h1=c->n_heads;
           for(i32 t=0;t<=pos;t++){
+            if(!bvh_keep_pos(m,pos,t)){ for(i32 h=h0;h<h1;h++) att[(size_t)h*ctx+t]=-1e30f; continue; }
             kv_key_row_h(m,L,t,h0/group,krow);
             for(i32 h=h0;h<h1;h++)
               att[(size_t)h*ctx+t]=dot_hd(q+(size_t)h*hd,krow,hd)*scale;
@@ -1237,12 +1291,12 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
             for(i32 j=0;j<hd;j++) qh[j]=0.f;
           }
           for(i32 t=0;t<=pos;t++){
+            if(!bvh_keep_pos(m,pos,t)) continue;
             kv_val_row_h(m,L,t,h0/group,vrow);
             for(i32 h=h0;h<h1;h++)
               fma_hd(q+(size_t)h*hd,vrow,att[(size_t)h*ctx+t],hd);
           }
-        }
-        free(krow); free(vrow);
+          }
       }
     }
 
@@ -1264,7 +1318,10 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
       Slot *wd=slot_get(m,R_FFN_DOWN,L);
       if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
       /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
-      if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
+      if(m->lora_r){
+        matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row); lora_add(hb,xb,m->loraA_gate[L],m->loraB_gate[L],m->loraM_gate[L],dim,hid,m->lora_r);
+        matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
+      } else if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
         matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
       else {
         matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
@@ -1297,8 +1354,10 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   if(!out) out=slot_get(m,R_TOK_EMBD,-1);
   if(require_slot(out,"output",-1)) return;
   /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
-  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return;
+  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)){ ob_update(m,logits); return; }
+  if(m->use_hdr){ for(int i=0;i<dim;i++) x[i]=hdr_tonemap(x[i]); }
   matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
+  ob_update(m,logits);
 }
 
 i32 model_sample(f32 *logits, i32 n, f32 temp){
@@ -1394,8 +1453,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
         #pragma omp parallel if(ngrp>=2 && pos0+B>=8)
 #endif
         {
-          f32 *krow=(f32*)malloc((size_t)hd*sizeof(f32));
-          f32 *vrow=(f32*)malloc((size_t)hd*sizeof(f32));
+          tls_kv_ensure(hd); f32 *krow=tls_krow; f32 *vrow=tls_vrow;
 #if defined(_OPENMP)
           #pragma omp for schedule(static)
 #endif
@@ -1423,8 +1481,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
                 for(i32 h=h0;h<h1;h++)
                   fma_hd(q+(size_t)t*nq+(size_t)h*hd,vrow,att[((size_t)t*c->n_heads+h)*ctx+p],hd);
             }
-          }
-          free(krow); free(vrow);
+            }
         }
       }
 

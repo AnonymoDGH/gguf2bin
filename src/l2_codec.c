@@ -12,11 +12,12 @@ void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
 #define OMP_MM_MIN 131072 /* ~512*256 elements — below this, single-thread wins */
 #if defined(_OPENMP)
 #include <omp.h>
-static f32 *g_fallback_buf[64] = {0};
-static size_t g_fallback_cap[64] = {0};
+#define G2B_FALLBACK_MAX 128
+static f32 *g_fallback_buf[G2B_FALLBACK_MAX] = {0};
+static size_t g_fallback_cap[G2B_FALLBACK_MAX] = {0};
 static inline f32* fallback_buf(size_t n){
   int tid = omp_get_thread_num();
-  if(tid<0||tid>=64) tid=0;
+  if(tid<0||tid>=G2B_FALLBACK_MAX) tid = tid % G2B_FALLBACK_MAX;
   if(g_fallback_cap[tid] < n){
     free(g_fallback_buf[tid]);
     g_fallback_buf[tid]=(f32*)malloc(n*sizeof(f32));
@@ -35,7 +36,7 @@ u64 ggml_block_size(u32 type){
   switch(type){
     case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1:
     case T_Q8_0: case T_Q8_1: return 32;
-    case T_Q4_0S: case T_Q4_0S_PSY: return 256;
+    case T_Q4_0S: case T_Q4_0S_PSY: case T_Q4_VVC: return 256;
     case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K:
     case T_Q6_K: case T_Q8_K: return 256;
     /* i-quants: superbloques de 256 (IQ4_NL usa 32) */
@@ -57,6 +58,7 @@ u64 ggml_type_bytes(u32 type){
     case T_Q8_1: return 36;
     case T_Q4_0S: return 130;
     case T_Q4_0S_PSY: return 132;
+    case T_Q4_VVC: return 98;
     case T_Q2_K: return 84;
     case T_Q3_K: return 110;
     case T_Q4_K: return 144;
@@ -526,6 +528,20 @@ void gguf_dequant(u32 type, u8 *src, f32 *out, u64 ne){
     case T_IQ1_M:   deq_iq1_m(src,out,ne); break;
     case T_IQ4_NL:  deq_iq4_nl(src,out,ne); break;
     case T_IQ4_XS:  deq_iq4_xs(src,out,ne); break;
+    case T_Q4_VVC: {
+      u64 nsb=ne/256;
+      for(u64 sb=0;sb<nsb;sb++){
+        const u8 *b_=src+sb*98;
+        f32 dsc=half_to_float(*(const u16*)b_);
+        for(int i=0;i<256;i++){
+          int bpos=i*3, byte=bpos>>3, bit=bpos&7;
+          int v=(b_[2+byte]>>bit)&7;
+          if(bit>5) v|= (b_[2+byte+1]<<(8-bit))&7;
+          int q=v+5;
+          out[sb*256+i]=dsc*((int)q-8);
+        }
+      }
+    } break;
     default: fprintf(stderr,"codec: tipo %u no soportado\n",type); memset(out,0,ne*4);
   }
 }
@@ -920,6 +936,32 @@ void matmul_q4_0s_psy_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B
     }
   }
 }
+void matmul_q4_vvc(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
+  u64 rs=row_stride(T_Q4_VVC,n);
+  #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    f32 *tmp=fallback_buf((size_t)n);
+    if(!tmp){ out[i]=0; continue; }
+    gguf_dequant(T_Q4_VVC,(u8*)(w+(size_t)i*rs),tmp,(u64)n);
+    f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
+    out[i]=s;
+  }
+}
+void matmul_q4_vvc_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
+  if(B<=0) return; if(B==1){ matmul_q4_vvc(out,x,w,n,d); return; }
+  u64 rs=row_stride(T_Q4_VVC,n);
+  #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
+  for(i32 i=0;i<d;i++){
+    f32 *tmp=fallback_buf((size_t)n);
+    if(!tmp){ for(i32 t=0;t<B;t++) out[(size_t)t*d+i]=0; continue; }
+    gguf_dequant(T_Q4_VVC,(u8*)(w+(size_t)i*rs),tmp,(u64)n);
+    for(i32 t=0;t<B;t++){
+      const f32 *xb=x+(size_t)t*n; f32 s=0;
+      for(i32 j=0;j<n;j++) s+=tmp[j]*xb[j];
+      out[(size_t)t*d+i]=s;
+    }
+  }
+}
 /* K-quant fused dots (sin dequantizar la fila) ── */
 /* dos mitades de 16 bytes → 32 nibbles contiguos dot contra 32 bytes i8 */
 static inline i32 nib_dot2(const __m128i pa, const __m128i pb, const u8 *act){
@@ -1187,6 +1229,7 @@ void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0,
   if(type==T_Q8_0){ matmul_q8_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q4_0S){ matmul_q4_0s(out+r0,x,w+(size_t)r0*st,n,d); return; }
+  if(type==T_Q4_VVC){ matmul_q4_vvc(out+r0,x,w+(size_t)r0*st,n,d); return; }
 #endif
 }
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
@@ -1197,6 +1240,7 @@ void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(type==T_Q4_0){ matmul_q4_0_b(out,x,w,n,d,B); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q4_0S){ matmul_q4_0s_b(out,x,w,n,d,B); return; }
+  if(type==T_Q4_VVC){ matmul_q4_vvc_b(out,x,w,n,d,B); return; }
 #endif
   if(type==T_Q8_0){ matmul_q8_0_b(out,x,w,n,d,B); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
@@ -1249,8 +1293,8 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q4_0S){ matmul_q4_0s(out,x,w,n,d); return; }
   if(type==T_Q4_0S_PSY){ matmul_q4_0s_psy(out,x,w,n,d); return; }
+  if(type==T_Q4_VVC){ matmul_q4_vvc(out,x,w,n,d); return; }
 #endif
-
   if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
 #if defined(__AVX2__) && !defined(DISABLE_AVX2)
   if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,1); return; }

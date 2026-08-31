@@ -23,7 +23,8 @@ enum {
   T_IQ3_S=21, T_IQ2_S=22, T_IQ4_XS=23, T_F64=28,
   T_IQ1_M=29, T_BF16=30,
   T_Q4_0S=25 /* interno: reutiliza un ID que GGUF no usa en pesos (compat con g2bx antiguos) */,
-  T_Q4_0S_PSY=26 /* psicoacústico: 2 escalas por 256 (baja/alta freq) 132B */
+  T_Q4_0S_PSY=26 /* psicoacústico: 2 escalas por 256 (baja/alta freq) 132B */,
+  T_Q4_VVC=27 /* VVC-intra: predicción vertical inter-fila + residuo 3-bit, ~85B/256 */
 };
 enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3, ARCH_QWEN35=4 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };
@@ -108,14 +109,18 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
                            int downq4, float prune, const f32 *calib);
 void g2bx_set_q4s(int v);
 void g2bx_set_q4s_psy(int v);
+void g2bx_set_q4vvc(int v);
 int vk_init(void); void vkinfo_cmd(void); int vk_device_ok(void);
 int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(void); void vk_head_run(const f32 *x, f32 *logits); int vk_head_ready(void);
 int g2bx_info(const char *path);
 
 typedef struct SHash SHash;
+typedef struct FMIndex FMIndex;
+struct FMIndex { char *bwt; u32 n; u32 C[256]; u32 *occ; };
 typedef struct {
   char **tok; i32 n; i32 bos, eos, unk;
   SHash *vocab; SHash *merges; char **mergestr; i32 nmerges;
+  FMIndex *fm;
 } Tokenizer;
 
 int tok_from_gguf(GGUF *g, Tokenizer *t);
@@ -152,6 +157,14 @@ typedef struct {
   i32 mv_seq; /* contador de tokens para MV */
   u64 mv_hits, mv_misses, mv_skips;
   float mv_ratio; /* --mv 0.0..1.0 tasa de skip (0=off, 0.5=50% FFN/SSM) */
+  u8 use_bvh; float bvh_keep; /* BVH sparse attention */
+  u8 use_ob; float ob_thresh; float ob_last_spread; /* OrderBook */
+  u8 use_zram; /* Swap-ZRAM */
+  u8 use_hdr; /* HDR head */
+  /* CYBER-mRNA LoRA v2 DoRA+GaLore+MoE */
+  i32 lora_r; f32 **loraA_q, **loraB_q, **loraA_v, **loraB_v, **loraA_gate, **loraB_gate;
+  f32 **loraM_q, **loraM_v, **loraM_gate; /* DoRA magnitude */
+  f32 **galore_m, **galore_v; /* GaLore low-rank moments */
   /* buffers del prefill batcheado ([B][...]) */
   i32 pf_B;
   f32 *pf_pool; /* base única del pool (lo único que se libera) */
@@ -207,5 +220,11 @@ i32 model_sample(f32 *logits, i32 n, f32 temp);
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
 int exp_synth_qwen_tiny(const char *out_path);
+int cyber_train(Model *m, const char *dataset, int steps, float lr, float replay);
+int cyber_train_particle(Model *m, const char *dataset, int steps, float temp_c);
+int cyber_save_lora(Model *m, const char *path);
+int cyber_load_lora(Model *m, const char *path);
+int cyber_pack_merge(const char *base_g2bx, const char *lora_path, const char *out_g2bx);
+void lora_add(f32 *out, const f32 *x, const f32 *A, const f32 *B, const f32 *M, int dim, int outdim, int r);
 
 #endif

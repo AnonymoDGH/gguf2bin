@@ -70,6 +70,38 @@ static void shash_free(SHash *h){
   if(h->k){ for(u32 i=0;i<h->cap;i++) free(h->k[i]); free(h->k); }
   free(h->v); h->k=NULL; h->v=NULL; h->cap=h->mask=h->cnt=0;
 }
+static FMIndex* fm_build(const char *s, u32 n){
+  FMIndex *fm=calloc(1,sizeof(FMIndex)); if(!fm) return NULL;
+  fm->n=n; fm->bwt=malloc(n+1); if(!fm->bwt){ free(fm); return NULL; }
+  u32 *sa=malloc(n*sizeof(u32)); if(!sa){ free(fm->bwt); free(fm); return NULL; }
+  for(u32 i=0;i<n;i++) sa[i]=i;
+  for(u32 i=0;i<n;i++) for(u32 j=i+1;j<n;j++) if(strcmp(s+sa[i], s+sa[j])>0){ u32 t=sa[i]; sa[i]=sa[j]; sa[j]=t; }
+  for(u32 i=0;i<n;i++){ u32 p=sa[i]; fm->bwt[i]= p? s[p-1]: s[n-1]; }
+  free(sa); fm->bwt[n]=0;
+  u32 cnt[256]={0}; for(u32 i=0;i<n;i++) cnt[(u8)fm->bwt[i]]++;
+  u32 sum=0; for(int c=0;c<256;c++){ fm->C[c]=sum; sum+=cnt[c]; }
+  fm->occ=calloc(256*(n/64+1),sizeof(u32));
+  return fm;
+}
+static int fm_rank(FMIndex *fm, u8 c, u32 pos){
+  if(!fm||!fm->bwt||pos>fm->n) return 0;
+  int r=0; for(u32 i=0;i<pos;i++) if((u8)fm->bwt[i]==c) r++;
+  return r;
+}
+static int fm_contains(FMIndex *fm, const char *key){
+  if(!fm||!key) return -1;
+  int l=0, r=(int)fm->n-1; int len=(int)strlen(key);
+  for(int i=len-1;i>=0;i--){
+    u8 c=(u8)key[i];
+    int rl= fm_rank(fm,c,l);
+    int rr= fm_rank(fm,c,r+1);
+    l= fm->C[c]+rl;
+    r= fm->C[c]+rr-1;
+    if(l>r) return -1;
+  }
+  return l;
+}
+static void fm_free(FMIndex *fm){ if(!fm) return; free(fm->bwt); free(fm->occ); free(fm); }
 int tok_from_gguf(GGUF *g, Tokenizer *t){
   memset(t,0,sizeof *t); tok_init_tables();
   char **toks=NULL; u64 nt=0;
@@ -86,6 +118,10 @@ int tok_from_gguf(GGUF *g, Tokenizer *t){
   if(shash_init(t->merges,1u<<19)) return -1;
   t->mergestr=mg; t->nmerges=(i32)nm;
   for(i32 i=0;i<(i32)nm;i++){ char *s=mg[i]; char *sp=strchr(s,' '); if(!sp) continue; size_t al=(size_t)(sp-s), bl=strlen(sp+1); char *key=malloc(al+1+bl+1); if(!key) continue; memcpy(key,s,al); key[al]=1; memcpy(key+al+1,sp+1,bl); key[al+1+bl]=0; if(shash_put(t->merges,key,i)){ free(key); return -1; } free(key); }
+  if(getenv("G2B_FM")){
+    size_t tot=0; for(i32 i=0;i<(i32)nm;i++) tot+= strlen(mg[i])+1;
+    char *S=malloc(tot+1); if(S){ size_t o=0; for(i32 i=0;i<(i32)nm;i++){ size_t l=strlen(mg[i]); memcpy(S+o,mg[i],l); o+=l; S[o++]='\n'; } S[o]=0; t->fm=fm_build(S,(u32)o); free(S); fprintf(stderr,"[fm] built n=%u bwt=%u\n", t->fm? t->fm->n:0, t->fm? (u32)strlen(t->fm->bwt):0); }
+  }
   return 0;
 }
 int tok_write_section(FILE *f, Tokenizer *t){
@@ -121,7 +157,7 @@ void tok_free(Tokenizer *t){
   if(!t) return;
   if(t->tok){ for(i32 i=0;i<t->n;i++) free(t->tok[i]); free(t->tok); }
   if(t->mergestr){ for(i32 i=0;i<t->nmerges;i++) free(t->mergestr[i]); free(t->mergestr); }
-  shash_free(t->vocab); free(t->vocab); shash_free(t->merges); free(t->merges); memset(t,0,sizeof *t);
+  shash_free(t->vocab); free(t->vocab); shash_free(t->merges); free(t->merges); fm_free(t->fm); t->fm=NULL; memset(t,0,sizeof *t);
 }
 i32 tok_encode(Tokenizer *t, const char *text, i32 **out){
   const u8 *p=(const u8*)text; size_t L=strlen(text); char **sym=NULL; i32 ns=0, scap=0;
