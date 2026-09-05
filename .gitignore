@@ -18,6 +18,9 @@ kvtest.exe
 *.gguf
 *.g2bx
 !tiny.g2bx
+# Fuzz seed corpus: binarios diminutos versionados a propósito
+!tools/fuzz/corpus/*.gguf
+!tools/fuzz/corpus/*.g2bx
 *.lora
 *.safetensors
 *.jsonl

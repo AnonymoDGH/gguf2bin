@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <assert.h>
 
 typedef uint8_t  u8;  typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
 typedef int8_t   i8;  typedef int16_t  i16; typedef int32_t  i32; typedef int64_t  i64;
@@ -71,6 +72,7 @@ typedef struct {
 } GGUF;
 
 int gguf_load(const char *path, GGUF *g); void gguf_free(GGUF *g);
+int gguf_load_mem(const u8 *data, size_t size, GGUF *g); /* fuzzing/bindings */
 u8 *gguf_tensor_ptr(GGUF *g, GTensor *t); GTensor *gguf_by_name(GGUF *g, const char *name);
 i64 gguf_meta_i64(GGUF *g, const char *key); f32 gguf_meta_f32(GGUF *g, const char *key);
 int gguf_meta_str(GGUF *g, const char *key, char *out, i32 outsz);
@@ -146,6 +148,7 @@ typedef struct {
   u8 *data; size_t data_size;
   Slot **ix_global; Slot ***ix_layer;
   f32 *kcache, *vcache, *buf; /* F32 KV + runtime scratch */
+  size_t buf_floats;            /* capacidad de buf en floats (asserts de carve) */
   u8  *kcq, *vcq;             /* KV cuantizado Q8_0 (cuando F_KV_Q8) */
   i32 ctx;                    /* contexto efectivo en runtime (<= c.seq_len) */
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
@@ -194,6 +197,53 @@ int model_load_g2bx(const char *path, Model *m);
 /* Estimación de RAM sin Model (g2b_info): misma fórmula que model_est_ram. */
 u64 model_est_ram_cfg(const ModelCfg *c, int fa_interval, int kv_q8, int ctx,
                       int pf_B, u64 tok_bytes);
+
+/* ── Split l5 (Fase 3): constantes y helpers compartidos entre
+ * model.c/kv.c/forward_*.c. Ninguno es API pública. ── */
+#define G2BX_PF_B 16   /* tokens por chunk del prefill batcheado */
+#define HY_NV_MAX 256  /* tope de arrays beta_v/g_v/dtb/av del híbrido (stack) */
+
+/* Scratch del forward denso/LFM2 tallado sobre m->buf (A25: con asserts). */
+typedef struct { f32 *x,*xb,*xb2,*hb,*hb2,*q,*k,*v,*att,*row; } FwdScratch;
+static inline void fwd_scratch_dense(const Model *m, FwdScratch *s){
+  const ModelCfg *c=&m->c;
+  i32 dim=c->dim, hid=c->hidden_dim;
+  i32 nq=c->n_heads*c->head_dim, nkv=c->n_kv_heads*c->head_dim;
+  i32 ctx=m->ctx>0?m->ctx:c->seq_len;
+  i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
+  if(m->arch==ARCH_LFM2 && 3*dim>maxn) maxn=3*dim;
+  s->x=m->buf; s->xb=s->x+dim; s->xb2=s->xb+dim; s->hb=s->xb2+dim; s->hb2=s->hb+hid;
+  s->q=s->hb2+hid; s->k=s->q+nq; s->v=s->k+nkv; s->att=s->v+nkv;
+  s->row=s->att+(size_t)c->n_heads*ctx;
+  assert((size_t)(s->row+maxn-m->buf) <= m->buf_floats);
+}
+
+/* runtime KV + alloc (kv.c) */
+void free_rt(Model *m);
+int alloc_rt(Model *m, i32 ctx);
+int kv_is_q8(const Model *m);
+size_t kv_q8_rowsize(i32 nkv);
+i32 kv_nlayers(const Model *m);
+void kv_store(Model *m, i32 layer, i32 pos, const f32 *k, const f32 *v);
+void kv_key_row_h(Model *m, i32 layer, i32 pos, i32 kvh, f32 *out);
+void kv_val_row_h(Model *m, i32 layer, i32 pos, i32 kvh, f32 *out);
+void tls_kv_ensure(i32 hd);
+#if defined(_OPENMP)
+extern __thread f32 *tls_krow, *tls_vrow; extern __thread i32 tls_cap;
+#else
+extern f32 *tls_krow, *tls_vrow; extern i32 tls_cap;
+#endif
+/* helpers de forward compartidos (forward_dense.c) */
+void load_vec_f32(Model *m, Slot *s, f32 *dst, i32 n);
+void apply_rope(Model *m, f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta);
+int require_slot(Slot *s, const char *what, i32 layer);
+f32 dot_hd(const f32 *a, const f32 *b, i32 n);
+void fma_hd(f32 *dst, const f32 *src, f32 scale, i32 n);
+void mv_update(Model *m, i32 token, int hit);
+u32 mv_hash(i32 token);
+int mv_tunable_skip(Model *m, i32 L, i32 pos, i32 token);
+void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_logits);
+int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits);
 /* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
 int  vk_worker_main(int argc, char **argv);          /* modo --gpu-worker (proceso hijo) */
 int  vk_dual_start(Model *m, const char *model_path); /* arranca worker (--gpu) */

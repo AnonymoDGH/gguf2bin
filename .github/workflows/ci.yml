@@ -1,0 +1,77 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build-test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y gcc make cmake
+      - name: make
+        run: make && make test && make kvtest && make q4bcheck && make iq1check && make q3kcheck && make prefilltest
+      - name: cmake
+        run: cmake -S . -B build -DG2B_BUILD_TESTS=ON && cmake --build build && cd build && ctest --output-on-failure
+
+  asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y gcc make
+      - name: build+test con sanitizers
+        run: >
+          make clean;
+          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" &&
+          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" test &&
+          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" kvtest prefilltest q4bcheck iq1check q3kcheck
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y clang cmake python3
+      - name: compila harnesses libFuzzer
+        run: >
+          for t in gguf g2bx tok; do
+            clang -O1 -g -fsanitize=fuzzer,address -fno-omit-frame-pointer
+              -std=c99 -Iinclude -Isrc -o /tmp/fuzz_$t tools/fuzz/fuzz_$t.c
+              src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c
+              src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c
+              src/forward_hybrid.c src/forward_prefill.c
+              src/l6_token.c src/l7_vulkan.c src/l8_cyber.c
+              src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
+              -lm;
+          done
+      - name: corre corpus (60s por target)
+        run: >
+          for t in gguf g2bx tok; do
+            timeout 60 /tmp/fuzz_$t tools/fuzz/corpus/ -max_total_time=45 || [ $? -eq 124 ];
+          done
+
+  mingw:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+      - name: build+test
+        run: mingw32-make && mingw32-make test && mingw32-make kvtest && mingw32-make q4bcheck && mingw32-make iq1check && mingw32-make q3kcheck && mingw32-make prefilltest
+
+  bench-regression:
+    # máquina de referencia con el runner self-hosted (i5-6200U del autor)
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, i5-6200u]
+    steps:
+      - uses: actions/checkout@v4
+      - name: bench
+        shell: cmd
+        run: |
+          mingw32-make
+          gguf2bin2.exe bench models\qwen3-0.6b.g2bx -n 32 > bench_now.txt 2>&1
+          python tools\check_regression.py bench_now.txt bench_baseline.json --update bench_report.json

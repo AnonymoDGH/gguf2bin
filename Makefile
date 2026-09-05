@@ -7,7 +7,9 @@ CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -
 LDFLAGS ?= -lm -fopenmp
 
 CORE = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
-       src/l5_model.c src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
+       src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c \
+       src/forward_hybrid.c src/forward_prefill.c \
+       src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
 SRC = $(CORE) src/main.c
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)

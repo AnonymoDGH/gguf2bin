@@ -66,6 +66,7 @@ static u8 *skip_val(u8 *p, const u8 *end, u32 vt){
   if(!adv||!bounds(p,end,adv)) return NULL;
   return p + adv;
 }
+static int gguf_parse_body(GGUF *g);
 int gguf_load(const char *path, GGUF *g){
   memset(g,0,sizeof *g);
   os_map_init(&g->map);
@@ -84,6 +85,20 @@ int gguf_load(const char *path, GGUF *g){
     fclose(f);
     g->own_data=1;
   }
+  return gguf_parse_body(g);
+}
+/* Carga desde un buffer en memoria (copia; útil para fuzzing y bindings). */
+int gguf_load_mem(const u8 *data, size_t size, GGUF *g){
+  memset(g,0,sizeof *g);
+  os_map_init(&g->map);
+  if(!data || size < GGUF_HDR_SIZE) return -1;
+  g->data=malloc(size);
+  if(!g->data) return -1;
+  memcpy(g->data,data,size); g->size=size; g->own_data=1;
+  if(gguf_parse_body(g)){ gguf_free(g); return -1; }
+  return 0;
+}
+static int gguf_parse_body(GGUF *g){
   const u8 *end=g->data+g->size;
   u8 *p=g->data;
   if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: invalid magic\n"); gguf_free(g); return -1; }
