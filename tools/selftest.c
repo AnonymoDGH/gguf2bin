@@ -102,7 +102,7 @@ static void t_g2bx(const char *model, const char *tmp){
   free(cp);
   /* round-trip: escribe header+blob a tmp y relee */
   char tp[1024]; snprintf(tp,sizeof tp,"%s/selftest_rt.g2bx",tmp);
-  FILE *o=fopen(tp,"wb");
+  FILE *o=fopen(tp,"w+b");
   CHECK(o!=NULL,"open tmp");
   if(o){
     int rc=g2bx_write_header(o,h.arch,h.flags,&h.cfg,h.slots,h.n_slots);
@@ -119,6 +119,8 @@ static void t_g2bx(const char *model, const char *tmp){
       for(uint32_t i=0;i<h.n_slots;i++) free(ptrs[i]);
     } else rc=-1;
     free(ptrs); free(szs);
+    if(!rc) rc=g2bx_write_footer(o);
+    CHECK(rc==0,"write_footer");
     fclose(o);
     CHECK(rc==0,"round-trip write");
     FILE *f2=fopen(tp,"rb");
@@ -141,6 +143,67 @@ static void t_g2bx(const char *model, const char *tmp){
   if(fb2) fclose(fb2);
   os_unlink(tb);
   g2bx_header_free(&h);
+}
+
+/* v3: footer obligatorio + normalización legacy 25/26/27 -> 0x80+. */
+static void t_g2bx_v3(const char *tmp){
+  /* archivo v2 con slot tipo 25 (legacy Q4_0S): el reader lo normaliza */
+  char tp[1024]; snprintf(tp,sizeof tp,"%s/selftest_legacy.g2bx",tmp);
+  FILE *o=fopen(tp,"w+b");
+  CHECK(o!=NULL,"legacy open");
+  if(o){
+    u8 hdr[4+2+1+1]; memcpy(hdr,"G2BX",4); hdr[4]=2; hdr[5]=0; hdr[6]=2; hdr[7]=0;
+    CHECK(fwrite(hdr,1,8,o)==8,"legacy magic");
+    ModelCfg c; memset(&c,0,sizeof c);
+    c.dim=64; c.hidden_dim=128; c.n_layers=1; c.n_heads=4; c.n_kv_heads=2;
+    c.vocab=128; c.seq_len=64; c.head_dim=16;
+    CHECK(fwrite(&c,sizeof c,1,o)==1,"legacy cfg");
+    u32 ns=1; CHECK(fwrite(&ns,4,1,o)==1,"legacy ns");
+    u8 role=2; u16 layer=0; u8 type=25; u32 nb=16; u64 off=0;
+    CHECK(fwrite(&role,1,1,o)==1 && fwrite(&layer,2,1,o)==1
+          && fwrite(&type,1,1,o)==1 && fwrite(&nb,4,1,o)==1
+          && fwrite(&off,8,1,o)==1,"legacy slot");
+    u8 z[16]; memset(z,0,sizeof z);
+    CHECK(fwrite(z,1,16,o)==16,"legacy blob");
+    fclose(o);
+    FILE *f=fopen(tp,"rb");
+    G2bxHeader h;
+    CHECK(f!=NULL && g2bx_read_header(f,&h)==0,"legacy read");
+    if(f) fclose(f);
+    CHECK(h.n_slots==1 && h.slots && h.slots[0].type==0x80,"legacy 25->0x80");
+    g2bx_header_free(&h);
+    /* corrompe un byte: el CRC debe fallar (es v2: sin footer... reescribe v3) */
+    FILE *o3=fopen(tp,"w+b");
+    CHECK(o3!=NULL,"legacy v3 open");
+    if(o3){
+      CHECK(fwrite(hdr,1,8,o3)==8,"v3 magic");
+      hdr[4]=3;
+      CHECK(fseek(o3,0,SEEK_SET)==0 && fwrite(hdr,1,8,o3)==8,"v3 ver");
+      CHECK(fwrite(&c,sizeof c,1,o3)==1,"v3 cfg");
+      CHECK(fwrite(&ns,4,1,o3)==1,"v3 ns");
+      type=0x80;
+      CHECK(fwrite(&role,1,1,o3)==1 && fwrite(&layer,2,1,o3)==1
+            && fwrite(&type,1,1,o3)==1 && fwrite(&nb,4,1,o3)==1
+            && fwrite(&off,8,1,o3)==1,"v3 slot");
+      CHECK(fwrite(z,1,16,o3)==16,"v3 blob");
+      CHECK(g2bx_write_footer(o3)==0,"v3 footer");
+      fclose(o3);
+      FILE *f3=fopen(tp,"rb");
+      G2bxHeader h3;
+      CHECK(f3!=NULL && g2bx_read_header(f3,&h3)==0,"v3 read ok");
+      if(f3) fclose(f3);
+      g2bx_header_free(&h3);
+      /* flip un byte del blob */
+      FILE *fc=fopen(tp,"r+b");
+      if(fc){ fseek(fc,100,SEEK_SET); int ch=fgetc(fc); fseek(fc,100,SEEK_SET); fputc(ch^0xFF,fc); fclose(fc); }
+      FILE *f4=fopen(tp,"rb");
+      G2bxHeader h4;
+      CHECK(f4!=NULL && g2bx_read_header(f4,&h4)!=0,"v3 corrupto falla");
+      if(f4) fclose(f4);
+      g2bx_header_free(&h4);
+    }
+    os_unlink(tp);
+  }
 }
 
 static void t_opts(void){
@@ -179,6 +242,7 @@ int main(int argc, char **argv){
   t_sampler();
   t_os(argv[1],tmp);
   t_g2bx(argv[1],tmp);
+  t_g2bx_v3(tmp);
   t_opts();
   if(fails){ fprintf(stderr,"selftest: %d FALLOS\n",fails); return 1; }
   printf("selftest: OK\n");

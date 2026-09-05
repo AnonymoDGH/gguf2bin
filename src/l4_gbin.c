@@ -471,12 +471,13 @@ skip_prune:
     }
   }
   u64 cursor=g2bx_layout_slots(slots,ns); u64 data_size=cursor;
-  FILE *o=fopen(out_path,"wb"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
+  FILE *o=fopen(out_path,"w+b"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
   u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
   int wr=1;
   if(g2bx_write_header(o,arch,disk_flags,&c,slots,ns)) wr=0;
   if(!wr || g2bx_write_blob(o,slots,ns,src_ptr,src_sz,data_size)) wr=0;
   Tokenizer tk; if(tok_from_gguf(&g,&tk)==0){ tok_write_section(o,&tk); fprintf(stderr,"  tokenizer: %d tokens, %d merges (bos=%d eos=%d)\n",tk.n,tk.nmerges,tk.bos,tk.eos); tok_free(&tk); } else fprintf(stderr,"  tokenizer: unavailable\n");
+  if(g2bx_write_footer(o)) wr=0;
   fclose(o);
   if(!wr){ fprintf(stderr,"g2bx: write error on %s (disk full?)\n",out_path); }
   fprintf(stderr,"g2bx pack -> %s\n  arch=%u flags=0x%02x layers=%d dim=%d head_dim=%d kv=%d vocab=%d\n  slots=%u weight_bytes=%llu (GGUF was %llu)\n  rope_theta=%.0f qk_norm=%s tie_embd=%s\n",out_path,arch,flags,c.n_layers,c.dim,c.head_dim,c.n_kv_heads,c.vocab,ns,(unsigned long long)data_size,(unsigned long long)g.size,c.rope_theta,(flags&F_QK_NORM)?"yes":"no",(flags&F_TIE_EMBD)?"yes":"no");
@@ -487,6 +488,7 @@ int g2bx_info(const char *path){
   G2bxHeader h;
   int hrc=g2bx_read_header(f,&h);
   if(hrc==-2){ fprintf(stderr,"g2bx: unsupported version %u (max %u)\n",h.ver,G2BX_VER_MAX); fclose(f); return -1; }
+  if(hrc==-3){ fprintf(stderr,"g2bx: checksum mismatch (file corrupt or truncated)\n"); fclose(f); return -1; }
   if(hrc){ fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
   u16 ver=h.ver; u8 arch=h.arch, flags=h.flags; ModelCfg c=h.cfg; u32 ns=h.n_slots;
   static const char *an[]={"llama","qwen2","qwen3","lfm2","qwen35"}; printf("G2BX v%u arch=%s flags=0x%02x\n",ver, arch<5?an[arch]:"?",flags);

@@ -25,10 +25,20 @@ typedef struct {
 } G2bxHeader;
 
 /* Lee magic/ver/cfg/slots + file_size + peek de tokenizer.
- * 0 ok | -1 header inválido/truncado | -2 versión no soportada (h.ver válido).
+ * 0 ok | -1 header inválido/truncado | -2 versión no soportada (h.ver válido)
+ * | -3 footer CRC inválido (solo v3).
+ * En v1/v2 normaliza los tipos legacy 25/26/27 al namespace 0x80+.
  * No cierra f; la posición final no está definida (los llamadores hacen seek). */
 int g2bx_read_header(FILE *f, G2bxHeader *h);
 void g2bx_header_free(G2bxHeader *h);
+
+/* Footer v3: [crc32 LE de todo lo previo][magic "G2BX"] (8 B al final).
+ * OJO: o debe estar abierto en modo lectura+escritura ("w+b"/"r+b"),
+ * porque el CRC se calcula releyendo lo escrito. */
+int g2bx_write_footer(FILE *o);
+int g2bx_verify_footer(FILE *f);
+/* Verificación completa sin cargar pesos: header, slots, tipos, geometría, CRC. */
+int g2bx_verify(const char *path, char *report, int replen);
 
 /* Asigna slots[i].off desde 0 con ALIGN64; devuelve el total. */
 u64 g2bx_layout_slots(Slot *slots, u32 ns);

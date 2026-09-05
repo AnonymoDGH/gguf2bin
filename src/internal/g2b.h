@@ -13,8 +13,8 @@ typedef int8_t   i8;  typedef int16_t  i16; typedef int32_t  i32; typedef int64_
 typedef float    f32;
 
 #define G2BX_MAGIC "G2BX"
-#define G2BX_VER   2u
-#define G2BX_VER_MAX 2u
+#define G2BX_VER   3u
+#define G2BX_VER_MAX 3u
 #define G2BX_CFG_V1 40 /* bytes de ModelCfg en v1 */
 #define ALIGN64(x) (((x)+63ull)&~63ull)
 
@@ -36,9 +36,15 @@ enum {
   T_IQ2_XXS=16, T_IQ2_XS=17, T_IQ3_XXS=18, T_IQ1_S=19, T_IQ4_NL=20,
   T_IQ3_S=21, T_IQ2_S=22, T_IQ4_XS=23, T_F64=28,
   T_IQ1_M=29, T_BF16=30,
-  T_Q4_0S=25 /* interno: reutiliza un ID que GGUF no usa en pesos (compat con g2bx antiguos) */,
-  T_Q4_0S_PSY=26 /* psicoacústico: 2 escalas por 256 (baja/alta freq) 132B */,
-  T_Q4_VVC=27 /* VVC-intra: predicción vertical inter-fila + residuo 3-bit, ~85B/256 */
+  /* GGUF nativos sin kernels: el packer los rechaza (nunca llegan a slots) */
+  T_I8=24, T_I16=25, T_I32=26, T_I64=27,
+  /* Tipos internos: desde G2BX v3 viven en 0x80+ para no colisionar con
+   * futuros IDs GGUF. En v1/v2 se escribieron como 25/26/27: el reader los
+   * normaliza al cargar (ver g2bx_io.c). */
+  T_Q4_0S=0x80 /* fp16 compartida por 256 */,
+  T_Q4_0S_PSY=0x81 /* psicoacústico: 2 escalas por 256 (baja/alta freq) 132B */,
+  T_Q4_VVC=0x82 /* VVC-intra: predicción vertical inter-fila + residuo 3-bit */,
+  T_Q4_0S_LEGACY=25, T_Q4_0S_PSY_LEGACY=26, T_Q4_VVC_LEGACY=27
 };
 enum { ARCH_LLAMA=0, ARCH_QWEN2=1, ARCH_QWEN3=2, ARCH_LFM2=3, ARCH_QWEN35=4 };
 enum { F_TIE_EMBD=1u<<0, F_QK_NORM=1u<<1, F_MMAP=1u<<2, F_KV_Q8=1u<<3 /* runtime KV cache cuantizado Q8_0 (no on-disk) */ };

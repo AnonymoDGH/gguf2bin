@@ -136,6 +136,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   G2bxHeader h;
   int hrc=g2bx_read_header(f,&h);
   if(hrc==-2){ fprintf(stderr,"model: unsupported G2BX version %u\n",h.ver); return -1; }
+  if(hrc==-3){ fprintf(stderr,"model: checksum mismatch (file corrupt or truncated)\n"); return -1; }
   if(hrc){ fprintf(stderr,"model: not G2BX\n"); return -1; }
   m->arch=h.arch; m->flags=h.flags; m->c=h.cfg;
   m->n_slots=h.n_slots; m->slots=h.slots; /* adopta el array */
@@ -379,10 +380,11 @@ int exp_synth_qwen_tiny(const char *out_path){
   }
 #undef ADD
   u64 cur=g2bx_layout_slots(slots,ns);
-  FILE *o=fopen(out_path,"wb"); if(!o) return -1;
+  FILE *o=fopen(out_path,"w+b"); if(!o) return -1;
   int wrc=0;
   if(g2bx_write_header(o,arch,flags,&c,slots,ns)) wrc=-1;
   else if(g2bx_write_blob(o,slots,ns,blobs,bsz,cur)) wrc=-1;
+  else if(g2bx_write_footer(o)) wrc=-1;
   fclose(o);
   for(u32 i=0;i<ns;i++) free(blobs[i]);
   if(wrc){ fprintf(stderr,"synth: write error on %s\n",out_path); return -1; }

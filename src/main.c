@@ -3,6 +3,7 @@
  * internals directamente; run/chat/bench/info/pack/vkinfo van por sesiones. */
 #include "gguf2bin.h"
 #include "internal/g2b.h"
+#include "internal/g2bx_io.h"
 #include "internal/opts.h"
 #include <stdlib.h>
 #include <string.h>
@@ -54,8 +55,9 @@ static void usage(const char *a0){
     "      --tokens a,b  raw token ids\n"
     "      --bos         prepend BOS\n"
     "      --gpu         CPU+GPU dual band for the head (needs stable Vulkan)\n"
-    "  %s synth  <out.g2bx>\n"
-    "  %s bench  <model> [-n N] [--prefill N]\n"
+  "  %s synth  <out.g2bx>\n"
+  "  %s verify <model.g2bx>\n"
+  "  %s bench  <model> [-n N] [--prefill N]\n"
     "  %s chat   <model> [-n N] [-t TEMP] [--system TXT|--no-system] [--no-think|--think]\n"
     "  %s ppl    <model> [-f file|-] [-n max_tokens]\n\n"
     "RAM / context (run, chat, bench):\n"
@@ -74,7 +76,7 @@ static void usage(const char *a0){
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
     "  %s chat llama.g2bx --fast --q8-kv -n 256\n"
     "  %s bench qwen.g2bx --max-ram 2048\n",
-    a0,a0,a0,a0,a0,a0,a0,a0,a0,a0);
+    a0,a0,a0,a0,a0,a0,a0,a0,a0,a0,a0);
 }
 
 static int cmd_pack(int argc, char **argv){
@@ -356,6 +358,11 @@ int main(int argc, char **argv){
   if(!strcmp(argv[1],"vkinfo")){
     char rep[512]; g2b_error e=g2b_vk_probe(rep,sizeof rep);
     printf("%s\n",rep); return e?1:0;
+  }
+  if(!strcmp(argv[1],"verify")){
+    if(argc<3){ usage(argv[0]); return 1; }
+    char rep[512]; int r=g2bx_verify(argv[2],rep,sizeof rep);
+    printf("%s\n",rep); return r?1:0;
   }
   usage(argv[0]); return 1;
 }

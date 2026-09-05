@@ -11,6 +11,8 @@ CORE = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
        src/forward_hybrid.c src/forward_prefill.c \
        src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
 SRC = $(CORE) src/main.c
+HDRS = include/gguf2bin.h include/version.h src/internal/g2b.h src/internal/g2bx_io.h \
+       src/internal/opts.h src/internal/os_mm.h src/internal/sampler.h
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)
   EXE = $(BIN).exe
@@ -42,14 +44,14 @@ KVSRC = tools/kvtest.c $(CORE)
 
 all: $(EXE)
 
-$(EXE): $(SRC) src/internal/g2b.h
+$(EXE): $(SRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 ifeq ($(OS),Windows_NT)
 	copy /Y $@ gguf2bin.exe
 endif
 
 tiny: tiny.exe
-tiny.exe: $(SRC) src/internal/g2b.h
+tiny.exe: $(SRC) $(HDRS)
 	$(CC) -Os -std=c99 -ffunction-sections -fdata-sections -Iinclude -Wall -o $@ $(SRC) -lm -Wl,--gc-sections -s
 
 # Portable smoke test (Windows + Unix)
@@ -64,7 +66,7 @@ test: $(EXE) apitest selftest
 
 # apitest: SOLO usa la API pública (compila con -Iinclude, sin -Isrc)
 apitest: $(APIEXE)
-$(APIEXE): tools/apitest.c $(CORE) include/gguf2bin.h
+$(APIEXE): tools/apitest.c $(CORE) $(HDRS)
 	$(CC) -O2 -std=c99 -Iinclude -o $@ tools/apitest.c $(CORE) $(LDFLAGS)
 
 # selftest: módulos Fase 2 (rng/sampler/os_mm/g2bx_io/opts) con internals
@@ -83,7 +85,7 @@ $(KVEXE): $(KVSRC)
 
 PFSRC = tools/prefilltest.c $(CORE)
 prefilltest: $(PFEXE)
-$(PFEXE): $(PFSRC) src/internal/g2b.h
+$(PFEXE): $(PFSRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(PFSRC) $(LDFLAGS)
 
 QBSRC = tools/q4bcheck.c $(CORE)
@@ -93,15 +95,15 @@ q4bcheck: $(QBEXE)
 IQSRC = tools/iq1check.c $(CORE)
 iq1check: $(IQEXE)
 	./$(IQEXE)
-$(IQEXE): $(IQSRC) src/internal/g2b.h
+$(IQEXE): $(IQSRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(IQSRC) $(LDFLAGS)
 
 QKSRC = tools/q3kcheck.c $(CORE)
 q3kcheck: $(QKEXE)
 	./$(QKEXE)
-$(QKEXE): $(QKSRC) src/internal/g2b.h
+$(QKEXE): $(QKSRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(QKSRC) $(LDFLAGS)
-$(QBEXE): $(QBSRC) src/internal/g2b.h
+$(QBEXE): $(QBSRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(QBSRC) $(LDFLAGS)
 
 rebuild: clean all

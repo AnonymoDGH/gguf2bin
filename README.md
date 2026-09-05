@@ -67,6 +67,7 @@ $ gguf2bin2 run qwen.g2bx "Hello" --max-ram 2048   # ideal for 2 GB machines
 ```bash
 gguf2bin2 pack model.gguf out.g2bx [--q4]     # GGUF → G2BX (--q4: half the bytes)
 gguf2bin2 info model.g2bx                     # slots, geometry, types
+gguf2bin2 verify model.g2bx                   # header + CRC + geometry, no weights load
 gguf2bin2 run m.g2bx "prompt" [-n N] [-t T] [--bos] [--gpu]
 gguf2bin2 chat m.g2bx [--no-think] [--fast] [--swap]
 gguf2bin2 bench m.g2bx [-n 32] [--prefill 256]
@@ -105,9 +106,10 @@ Included numerical validation: `make kvtest` (F32 vs Q8 KV), `tools/prefilltest`
 <summary><b>📦 G2BX format & supported types</b></summary>
 
 ```
-G2BX | ver:u16 | arch:u8 | flags:u8 | ModelCfg | n_slots:u32 | Slot[] | data[] 64B-aligned | tokenizer
+G2BX | ver:u16 | arch:u8 | flags:u8 | ModelCfg | n_slots:u32 | Slot[] | data[] 64B-aligned | tokenizer | [v3: crc32 + "G2BX"]
 Slot: role:u8 layer:u16 type:u8 nbytes:u32 off:u64
 ```
+Full spec: `docs/G2BX_SPEC.md` (v1/v2/v3 compat matrix; own types live at 0x80+ since v3).
 
 | Type | Load | Fused matmul |
 |------|------|--------------|
@@ -124,24 +126,29 @@ Slot: role:u8 layer:u16 type:u8 nbytes:u32 off:u64
 <summary><b>🗂 Project layout</b></summary>
 
 ```
-include/g2b.h      common API
-src/l1_gguf.c      GGUF parser (mmap)
-src/l2_codec.c     fused dequant + matmul (AVX2)
-src/l3_math.c      rmsnorm, rope, silu, softmax AVX2
-src/l4_gbin.c      G2BX packer (generic per-architecture read_cfg)
-src/l5_model.c     load + forward + Q8 KV + RAM budget + GQA-major attention
-src/l6_token.c     BPE tokenizer
-src/main.c         CLI (quickselect/Gumbel sampling, chat with context compaction)
-src/l7_vulkan.c    dual band GPU backend (child-process worker, crash-proof)
-shaders/           compute shaders (Q4_0/Q4_0S GEMV)
-tools/             kvtest · prefilltest · exptest · qkcheck · mmbench · dump_gguf.py
-docs/RESEARCH.md   research notes and performance roadmap
+include/gguf2bin.h   public API (sessions) · src/internal/ shared internals
+src/model.c          G2BX load/free, geometry, RAM budget, synth
+src/kv.c             F32/Q8 KV cache, disk swap, runtime alloc, TLS
+src/forward_*.c      dense (+dispatch) / lfm2 / qwen35-hybrid / batched prefill
+src/l1_gguf.c        GGUF parser (mmap) · src/l4_gbin.c  G2BX packer
+src/l2_codec.c       fused dequant + matmul (AVX2) · src/l3_math.c  norms/rope/softmax
+src/l6_token.c       BPE tokenizer · src/l7_vulkan.c  dual-band GPU (child process)
+src/g2b_api.c        API implementation · src/os_mm.c  mmap/files · src/sampler.c
+src/opts.c           CLI flags · src/g2bx_io.c  G2BX reader/writer/CRC/verify
+src/main.c           CLI · shaders/  Q4_0/Q4_0S GEMV · tools/  harnesses + fuzz/
+docs/G2BX_SPEC.md    format spec · docs/RESEARCH.md  notes + roadmap
 ```
 
 </details>
 
 <details>
 <summary><b>📜 Changelog</b></summary>
+
+#### v5.0 — G2BX v3: CRC'd format + own type namespace
+- **CRC32 footer**: every new `.g2bx` ends with `[crc32 of everything before][magic]`; the loader verifies on open (warming the page cache as a side effect) and rejects truncated/corrupt files with a clear message. New `verify` command (header + slots + types + geometry + CRC without loading weights).
+- **Internal types at 0x80+**: Q4_0S/PSY/VVC leave IDs 25/26/27 (I16/I32/I64 in ggml today — a real collision). v1/v2 files are normalized on load; the packer already rejected native I16/I32/I64.
+- **Written spec**: `docs/G2BX_SPEC.md` (layout, field-by-field LE, v1/v2/v3 compat matrix). Header serialization is now explicit LE in `g2bx_io` (byte-identical on x86).
+- Harness-guarded refactors: l5 split, public API, `os_mm/sampler/opts/g2bx_io` modules, CI + CMake.
 
 #### v4.9 — IQ1_S + Q3_K fused (27B desatascado)
 - **IQ1_S integer dot** (`madd`+SAD, act Q8, 1 hsum/escala por 32): the 264 IQ1_S slots (~3.4 GB) ran scalar fallback; the old fused prototype existed but was never dispatched. Wired into `matmul_q`/`matmul_q_b`, validated by new `tools/iq1check` (vs exact-Q8 math: maxrel 5e-4).
