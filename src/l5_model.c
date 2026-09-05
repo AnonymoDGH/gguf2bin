@@ -1,17 +1,12 @@
 /* L5 — load G2BX + forward (Llama/Qwen2/Qwen3) — FIXED v3.3 */
 #include "internal/g2b.h"
+#include "internal/g2bx_io.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
-#include <sys/stat.h>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
+#include <sys/stat.h> /* model_load_gguf: cache .gguf.g2bx por mtime */
+/* SO (mmap/swap) via os_mm; aquí no hay #ifdefs de plataforma. */
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -38,11 +33,6 @@ static inline void tls_kv_ensure(i32 hd){
   tls_krow=(f32*)malloc((size_t)hd*sizeof(f32)); tls_vrow=(f32*)malloc((size_t)hd*sizeof(f32));
   tls_cap=(tls_krow&&tls_vrow)?hd:0;
 }
-#endif
-#if defined(_WIN32)
-#define fseek64 _fseeki64
-#else
-#define fseek64(f, off, whence) fseeko(f, (off_t)(off), whence)
 #endif
 static inline int bvh_keep_pos(const Model *m, i32 pos, i32 t){
   if(!m->use_bvh) return 1;
@@ -139,49 +129,19 @@ void q8_dequant_row_avx2(const u8 *src, f32 *out, i32 n){
 }
 #endif
 
-#if defined(_WIN32)
 /* Respaldar la KV cache en un archivo (p.ej. D:) -> páginas frías se vuelcan a disco. */
 static int kv_swap_alloc(Model *m, size_t bytes){
   if(!m->swap_path || bytes==0) return -1;
-  HANDLE f=CreateFileA(m->swap_path,GENERIC_READ|GENERIC_WRITE,0,NULL,
-                       CREATE_ALWAYS,FILE_ATTRIBUTE_TEMPORARY,NULL);
-  if(f==INVALID_HANDLE_VALUE) return -1;
-  LARGE_INTEGER sz; sz.QuadPart=(LONGLONG)bytes;
-  if(!SetFilePointerEx(f,sz,NULL,FILE_BEGIN)||!SetEndOfFile(f)){ CloseHandle(f); return -1; }
-  HANDLE mm=CreateFileMappingA(f,NULL,PAGE_READWRITE,(DWORD)((u64)bytes>>32),(DWORD)(bytes&0xffffffffu),NULL);
-  if(!mm){ CloseHandle(f); return -1; }
-  void *v=MapViewOfFile(mm,FILE_MAP_ALL_ACCESS,0,0,(SIZE_T)bytes);
-  if(!v){ CloseHandle(mm); CloseHandle(f); return -1; }
-  m->swap_f=(void*)f; m->swap_m=(void*)mm; m->swap_view=v; m->swap_size=bytes; m->use_swap=1;
+  if(os_map_rw_new(m->swap_path,bytes,&m->swapmap)) return -1;
+  m->use_swap=1;
   return 0;
 }
 static void kv_swap_free(Model *m){
-  if(!m->use_swap || !m->swap_view) return;
-  UnmapViewOfFile(m->swap_view);
-  if(m->swap_m) CloseHandle((HANDLE)m->swap_m);
-  if(m->swap_f) CloseHandle((HANDLE)m->swap_f);
-  m->swap_view=NULL; m->swap_m=NULL; m->swap_f=NULL; m->swap_size=0; m->use_swap=0;
-  if(m->swap_path) DeleteFileA(m->swap_path);
+  if(!m->use_swap || !m->swapmap.view) return;
+  os_unmap(&m->swapmap);
+  m->use_swap=0;
+  if(m->swap_path) os_unlink(m->swap_path);
 }
-#else
-static int kv_swap_alloc(Model *m, size_t bytes){
-  if(!m->swap_path || bytes==0) return -1;
-  int fd=open(m->swap_path,O_RDWR|O_CREAT|O_TRUNC,0600);
-  if(fd<0) return -1;
-  if(ftruncate(fd,(off_t)bytes)){ close(fd); return -1; }
-  void *v=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-  if(v==MAP_FAILED){ close(fd); return -1; }
-  m->swap_fd=fd; m->swap_view=v; m->swap_size=bytes; m->use_swap=1;
-  return 0;
-}
-static void kv_swap_free(Model *m){
-  if(!m->use_swap || !m->swap_view) return;
-  if(m->swap_size) munmap(m->swap_view,m->swap_size);
-  if(m->swap_fd>=0) close(m->swap_fd);
-  m->swap_view=NULL; m->swap_fd=-1; m->swap_size=0; m->use_swap=0;
-  if(m->swap_path) unlink(m->swap_path);
-}
-#endif
 
 /* Híbrido qwen35: solo las capas de atención completa usan KV cache. */
 static i32 kv_iv(const Model *m){ return m->c.fa_interval>0?m->c.fa_interval:0; }
@@ -207,7 +167,7 @@ static void free_rt(Model *m){
   free(m->ssm_st); m->ssm_st=NULL;
   /* mv_table persiste entre ctx switches para conservar historia predictiva */
   // no free mv_table aquí — se libera en model_free
-  if(m->use_swap && m->swap_view){ kv_swap_free(m); return; }
+  if(m->use_swap && m->swapmap.view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
 }
@@ -233,7 +193,7 @@ static int alloc_rt(Model *m, i32 ctx){
   else   half=(size_t)nkvL*(size_t)ctx*(size_t)nkv*sizeof(f32);
   usize=2*half;
   if(m->swap_path && kv_swap_alloc(m,usize)==0){
-    u8 *base=(u8*)m->swap_view;
+    u8 *base=(u8*)m->swapmap.view;
     if(q8){ m->kcq=base; m->vcq=base+half; m->kcache=NULL; m->vcache=NULL; }
     else  { m->kcache=(f32*)base; m->vcache=(f32*)(base+half); m->kcq=NULL; m->vcq=NULL; }
   } else {
@@ -452,15 +412,7 @@ static void kv_val_row_h(Model *m, i32 layer, i32 pos, i32 kvh, f32 *out){
 static void model_unmap(Model *m){
   if(!m || !m->data) return;
   if(m->use_mmap){
-#if defined(_WIN32)
-    if(m->map_view){ UnmapViewOfFile(m->map_view); m->map_view=NULL; }
-    if(m->map_handle){ CloseHandle((HANDLE)m->map_handle); m->map_handle=NULL; }
-    if(m->file_handle){ CloseHandle((HANDLE)m->file_handle); m->file_handle=NULL; }
-#else
-    if(m->map_view && m->map_size) munmap(m->map_view, m->map_size);
-    m->map_view=NULL; m->map_size=0;
-    if(m->fd>=0){ close(m->fd); m->fd=-1; }
-#endif
+    os_unmap(&m->wmap);
     m->data=NULL; m->own_data=0; m->use_mmap=0;
   } else if(m->own_data){
     free(m->data); m->data=NULL; m->own_data=0;
@@ -469,25 +421,14 @@ static void model_unmap(Model *m){
 
 /* Load G2BX: prefer mmap of weight blob when possible; fallback to malloc+fread. */
 static int load_header_body(FILE *f, Model *m, const char *path){
-  char magic[4]; u16 ver;
-  if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)
-     ||fread(&ver,2,1,f)!=1||fread(&m->arch,1,1,f)!=1||fread(&m->flags,1,1,f)!=1){
-    fprintf(stderr,"model: not G2BX\n"); return -1;
-  }
-  if(ver==0||ver>G2BX_VER_MAX){ fprintf(stderr,"model: unsupported G2BX version %u\n",ver); return -1; }
-  if(ver>=2){ if(fread(&m->c,sizeof m->c,1,f)!=1) return -1; }
-  else { /* v1: cfg de 40 bytes, sin campos ssm */
-    memset(&m->c,0,sizeof m->c);
-    if(fread(&m->c,G2BX_CFG_V1,1,f)!=1) return -1;
-  }
-  if(fread(&m->n_slots,4,1,f)!=1){
-    fprintf(stderr,"model: not G2BX\n"); return -1;
-  }
-  if(m->n_slots==0 || m->n_slots>(1u<<20)){
-    fprintf(stderr,"model: n_slots=%u invalid\n",m->n_slots); return -1;
-  }
-  m->slots=malloc(m->n_slots*sizeof(Slot));
-  if(!m->slots || fread(m->slots,sizeof(Slot),m->n_slots,f)!=m->n_slots) return -1;
+  G2bxHeader h;
+  int hrc=g2bx_read_header(f,&h);
+  if(hrc==-2){ fprintf(stderr,"model: unsupported G2BX version %u\n",h.ver); return -1; }
+  if(hrc){ fprintf(stderr,"model: not G2BX\n"); return -1; }
+  m->arch=h.arch; m->flags=h.flags; m->c=h.cfg;
+  m->n_slots=h.n_slots; m->slots=h.slots; /* adopta el array */
+  i64 header_end=(i64)h.data_start;
+  memset(&h,0,sizeof h);
 
   u64 max_end=0;
   for(u32 i=0;i<m->n_slots;i++){
@@ -499,72 +440,21 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   u64 aligned_end=ALIGN64(max_end);
   m->data_size=(size_t)aligned_end;
 
-  i64 header_end;
-# if defined(_WIN32)
-  header_end = _ftelli64(f);
-# else
-  header_end = (i64)ftello(f);
-# endif
   if(header_end < 0) return -1;
 
   int used_mmap = 0;
-#if defined(_WIN32)
-  {
-    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if(hf != INVALID_HANDLE_VALUE){
-      LARGE_INTEGER fsz;
-      if(GetFileSizeEx(hf, &fsz)){
-        HANDLE hm = CreateFileMappingA(hf, NULL, PAGE_READONLY, 0, 0, NULL);
-        if(hm){
-          void *view = MapViewOfFile(hm, FILE_MAP_READ, 0, 0, 0);
-          if(view){
-            m->file_handle = (void*)hf;
-            m->map_handle  = (void*)hm;
-            m->map_view    = view;
-            m->map_size    = (size_t)fsz.QuadPart;
-            if((size_t)header_end + m->data_size <= m->map_size){
-              m->data = (u8*)view + (size_t)header_end;
-              m->own_data = 0;
-              m->use_mmap = 1;
-              used_mmap = 1;
-              /* tokenizer starts after weight blob */
-              fseek64(f, header_end + (i64)m->data_size, SEEK_SET);
-            } else {
-              UnmapViewOfFile(view); CloseHandle(hm); CloseHandle(hf);
-              m->file_handle=m->map_handle=m->map_view=NULL; m->map_size=0;
-            }
-          } else { CloseHandle(hm); CloseHandle(hf); }
-        } else CloseHandle(hf);
-      } else CloseHandle(hf);
+  { /* blob de pesos por mmap (page cache evictable); fallback malloc+fread */
+    OsMap om; os_map_init(&om);
+    if(os_map_ro(path,&om)==0){
+      if((size_t)header_end + m->data_size <= om.size){
+        m->wmap=om;
+        m->data=(u8*)om.view + (size_t)header_end;
+        m->own_data=0; m->use_mmap=1; used_mmap=1;
+        /* tokenizer starts after weight blob */
+        os_fseek(f, header_end + (i64)m->data_size, SEEK_SET);
+      } else os_unmap(&om);
     }
   }
-#else
-  {
-    int fd = open(path, O_RDONLY);
-    if(fd >= 0){
-      struct stat st;
-      if(fstat(fd, &st)==0){
-        void *view = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        if(view != MAP_FAILED){
-          m->fd = fd;
-          m->map_view = view;
-          m->map_size = (size_t)st.st_size;
-          if((size_t)header_end + m->data_size <= m->map_size){
-            m->data = (u8*)view + (size_t)header_end;
-            m->own_data = 0;
-            m->use_mmap = 1;
-            used_mmap = 1;
-            fseek64(f, header_end + (i64)m->data_size, SEEK_SET);
-          } else {
-            munmap(view, (size_t)st.st_size); close(fd);
-            m->fd=-1; m->map_view=NULL; m->map_size=0;
-          }
-        } else close(fd);
-      } else close(fd);
-    }
-  }
-#endif
 
   if(!used_mmap){
     m->use_mmap=0;
@@ -623,10 +513,8 @@ static int load_header_body(FILE *f, Model *m, const char *path){
 
 int model_load_g2bx(const char *path, Model *m){
   memset(m,0,sizeof *m);
-#if !defined(_WIN32)
-  m->fd = -1;
-  m->swap_fd = -1;
-#endif
+  os_map_init(&m->wmap);
+  os_map_init(&m->swapmap);
   FILE *f=fopen(path,"rb");
   if(!f){ fprintf(stderr,"model: cannot open %s\n",path); return -1; }
   int rc=load_header_body(f,m,path);
@@ -673,10 +561,8 @@ void model_free(Model *m){
   free(m->src_path); m->src_path=NULL;
   if(m->tok){ tok_free(m->tok); free(m->tok); m->tok=NULL; }
   memset(m,0,sizeof *m);
-#if !defined(_WIN32)
-  m->fd = -1;
-  m->swap_fd = -1;
-#endif
+  os_map_init(&m->wmap);
+  os_map_init(&m->swapmap);
 }
 
 static void load_vec_f32(Model *m, Slot *s, f32 *dst, i32 n){
@@ -711,9 +597,7 @@ static inline f32 dot_hd(const f32 *a, const f32 *b, i32 n){
     s3=_mm256_fmadd_ps(_mm256_loadu_ps(a+j+24),_mm256_loadu_ps(b+j+24),s3);
   }
   __m256 ss=_mm256_add_ps(_mm256_add_ps(s0,s1),_mm256_add_ps(s2,s3));
-  __m128 lo=_mm256_castps256_ps128(ss), hi=_mm256_extractf128_ps(ss,1);
-  lo=_mm_add_ps(lo,hi); lo=_mm_add_ps(lo,_mm_movehl_ps(lo,lo)); lo=_mm_add_ss(lo,_mm_shuffle_ps(lo,lo,1));
-  f32 s=_mm_cvtss_f32(lo);
+  f32 s=hsum_ps(ss);
   for(;j<n;j++) s+=a[j]*b[j];
   return s;
 #else
@@ -1390,24 +1274,6 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   ob_update(m,logits);
 }
 
-i32 model_sample(f32 *logits, i32 n, f32 temp){
-  if(n<=0) return 0;
-  if(temp<=0.f){
-    i32 bi=0; f32 bv=logits[0];
-    for(i32 i=1;i<n;i++) if(logits[i]>bv){ bv=logits[i]; bi=i; }
-    return bi;
-  }
-  for(i32 i=0;i<n;i++) logits[i]/=temp;
-  softmax(logits,n);
-  /* xorshift64* (rand()/RAND_MAX=32767 en Windows destroza la distribución) */
-  static u64 rs=0x9E3779B97F4A7C15ull;
-  rs^=rs>>12; rs^=rs<<25; rs^=rs>>27;
-  f32 r=(f32)(((rs*2685821657736338717ull)>>40)*(1.0/16777216.0));
-  f32 c=0;
-  for(i32 i=0;i<n;i++){ c+=logits[i]; if(r<=c) return i; }
-  return n-1;
-}
-
 /* ── Prefill batcheado: B tokens por pasada de pesos ──
    Cada fila de pesos se lee UNA vez y se reusa para los B tokens del chunk
    (aritmética ×B); cada fila K/V se dequantiza una vez para todo el chunk.
@@ -1674,20 +1540,14 @@ int exp_synth_qwen_tiny(const char *out_path){
     ADD(R_FFN_DOWN,L,T_Q4_0,(u64)c.dim*c.hidden_dim);
   }
 #undef ADD
-  u64 cur=0;
-  for(u32 i=0;i<ns;i++){ slots[i].off=cur; cur=(cur+slots[i].nbytes+63ull)&~63ull; }
+  u64 cur=g2bx_layout_slots(slots,ns);
   FILE *o=fopen(out_path,"wb"); if(!o) return -1;
-  u16 ver=G2BX_VER;
-  fwrite("G2BX",1,4,o); fwrite(&ver,2,1,o); fwrite(&arch,1,1,o); fwrite(&flags,1,1,o);
-  fwrite(&c,sizeof c,1,o); fwrite(&ns,4,1,o); fwrite(slots,sizeof(Slot),ns,o);
-  u8 z[64]={0}; u64 w=0;
-  for(u32 i=0;i<ns;i++){
-    while(w<slots[i].off){ u64 p=slots[i].off-w; if(p>64)p=64; fwrite(z,1,(size_t)p,o); w+=p; }
-    fwrite(blobs[i],1,bsz[i],o); w+=bsz[i];
-  }
-  while(w<cur){ u64 p=cur-w; if(p>64)p=64; fwrite(z,1,(size_t)p,o); w+=p; }
+  int wrc=0;
+  if(g2bx_write_header(o,arch,flags,&c,slots,ns)) wrc=-1;
+  else if(g2bx_write_blob(o,slots,ns,blobs,bsz,cur)) wrc=-1;
   fclose(o);
   for(u32 i=0;i<ns;i++) free(blobs[i]);
+  if(wrc){ fprintf(stderr,"synth: write error on %s\n",out_path); return -1; }
   fprintf(stderr,"synth qwen-tiny -> %s (%llu B, %u slots)\n",
     out_path,(unsigned long long)cur,ns);
   return 0;

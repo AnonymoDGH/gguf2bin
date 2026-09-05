@@ -7,7 +7,7 @@ CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -
 LDFLAGS ?= -lm -fopenmp
 
 CORE = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
-       src/l5_model.c src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c
+       src/l5_model.c src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
 SRC = $(CORE) src/main.c
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)
@@ -18,6 +18,7 @@ ifeq ($(OS),Windows_NT)
   IQEXE = tools/iq1check.exe
   QKEXE = tools/q3kcheck.exe
   APIEXE = tools/apitest.exe
+  STEXE = tools/selftest.exe
   TEST_MODEL = tiny_test.g2bx
 else
   EXE = $(BIN)
@@ -27,6 +28,7 @@ else
   IQEXE = tools/iq1check
   QKEXE = tools/q3kcheck
   APIEXE = tools/apitest
+  STEXE = tools/selftest
   TEST_MODEL = /tmp/tiny_test.g2bx
   LDFLAGS += -ldl
 endif
@@ -34,7 +36,7 @@ endif
 # Herramienta: verificacion numerica KV cache F32 vs Q8_0 (misma arquitectura)
 KVSRC = tools/kvtest.c $(CORE)
 
-.PHONY: all clean tiny test kvtest prefilltest q4bcheck iq1check q3kcheck apitest rebuild
+.PHONY: all clean tiny test kvtest prefilltest q4bcheck iq1check q3kcheck apitest selftest rebuild
 
 all: $(EXE)
 
@@ -49,18 +51,26 @@ tiny.exe: $(SRC) src/internal/g2b.h
 	$(CC) -Os -std=c99 -ffunction-sections -fdata-sections -Iinclude -Wall -o $@ $(SRC) -lm -Wl,--gc-sections -s
 
 # Portable smoke test (Windows + Unix)
-test: $(EXE) apitest
+test: $(EXE) apitest selftest
 	./$(EXE) synth $(TEST_MODEL)
 	./$(EXE) info $(TEST_MODEL)
 	./$(EXE) run $(TEST_MODEL) -n 4 -t 0
 	./$(EXE) bench $(TEST_MODEL) -n 8
 	./$(APIEXE) $(TEST_MODEL) -n 8 --seed 42
+	./$(STEXE) $(TEST_MODEL) .
 	@echo "test OK"
 
 # apitest: SOLO usa la API pública (compila con -Iinclude, sin -Isrc)
 apitest: $(APIEXE)
 $(APIEXE): tools/apitest.c $(CORE) include/gguf2bin.h
 	$(CC) -O2 -std=c99 -Iinclude -o $@ tools/apitest.c $(CORE) $(LDFLAGS)
+
+# selftest: módulos Fase 2 (rng/sampler/os_mm/g2bx_io/opts) con internals
+STSRC = tools/selftest.c $(CORE)
+selftest: $(STEXE)
+	./$(STEXE) $(TEST_MODEL) .
+$(STEXE): $(STSRC)
+	$(CC) $(CFLAGS) -o $@ $(STSRC) $(LDFLAGS)
 
 # Valida equivalencia F32 vs Q8 KV sobre un modelo (por defecto el sintetico)
 kvtest: $(KVEXE)
@@ -98,10 +108,10 @@ ifeq ($(OS),Windows_NT)
 clean:
 	-del /Q $(BIN).exe tiny.exe gguf2bin.exe tiny_test.g2bx _check_tiny.g2bx 2>NUL
 	-del /Q src\*.o 2>NUL
-	-del /Q tools\kvtest.exe tools\prefilltest.exe tools\q4bcheck.exe tools\iq1check.exe tools\q3kcheck.exe tools\apitest.exe 2>NUL
+	-del /Q tools\kvtest.exe tools\prefilltest.exe tools\q4bcheck.exe tools\iq1check.exe tools\q3kcheck.exe tools\apitest.exe tools\selftest.exe 2>NUL
 else
 clean:
-	rm -f $(BIN) $(BIN).exe tiny.exe tiny *.o src/*.o tiny_test.g2bx _check_tiny.g2bx $(KVEXE) $(PFEXE) $(QBEXE) $(IQEXE) $(QKEXE) $(APIEXE)
+	rm -f $(BIN) $(BIN).exe tiny.exe tiny *.o src/*.o tiny_test.g2bx _check_tiny.g2bx $(KVEXE) $(PFEXE) $(QBEXE) $(IQEXE) $(QKEXE) $(APIEXE) $(STEXE)
 	-rm -f /tmp/tiny_test.g2bx 2>/dev/null || true
 endif
 

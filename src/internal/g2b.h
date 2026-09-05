@@ -2,6 +2,7 @@
 #ifndef G2B_H
 #define G2B_H
 #include "version.h"
+#include "os_mm.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -15,6 +16,17 @@ typedef float    f32;
 #define G2BX_VER_MAX 2u
 #define G2BX_CFG_V1 40 /* bytes de ModelCfg en v1 */
 #define ALIGN64(x) (((x)+63ull)&~63ull)
+
+#if defined(__AVX2__)
+#include <immintrin.h>
+/* Reducción horizontal de 8 floats (antes copiada 4+ veces en l3/l5). */
+static inline f32 hsum_ps(__m256 v){
+  __m128 lo=_mm_add_ps(_mm256_castps256_ps128(v),_mm256_extractf128_ps(v,1));
+  lo=_mm_add_ps(lo,_mm_movehl_ps(lo,lo));
+  lo=_mm_add_ss(lo,_mm_shuffle_ps(lo,lo,1));
+  return _mm_cvtss_f32(lo);
+}
+#endif
 
 enum {
   T_F32=0, T_F16=1, T_Q4_0=2, T_Q4_1=3, T_Q5_0=6, T_Q5_1=7,
@@ -55,12 +67,7 @@ typedef struct { char *name; u32 n_dims; u64 *dims; u32 type; u64 offset; } GTen
 typedef struct {
   u8 *data; size_t size; u32 version; u64 n_tensors, alignment, data_off; GTensor *t;
   u8 own_data; /* 1=malloc (free), 2=mmap (unmap) */
-  void *map_view; size_t map_size;
-#if defined(_WIN32)
-  void *file_handle; void *map_handle;
-#else
-  int fd;
-#endif
+  OsMap map;   /* vista + handles del mmap (Fase 2: cero #ifdef fuera de os_mm) */
 } GGUF;
 
 int gguf_load(const char *path, GGUF *g); void gguf_free(GGUF *g);
@@ -176,27 +183,18 @@ typedef struct {
   u8 use_mmap; /* runtime only; not part of on-disk flags */
   /* KV respaldada en archivo (swap) — p.ej. usar D: como RAM */
   u8 use_swap;
-  void *swap_view; size_t swap_size;
+  OsMap swapmap;     /* vista RW del archivo KV */
   char *swap_path;
   char *src_path; /* G2BX realmente mapeado (puede ser cache .gguf.g2bx) */
   /* mmap state (when use_mmap) */
-  void *map_view;
-  size_t map_size;
-#if defined(_WIN32)
-  void *file_handle;
-  void *map_handle;
-  void *swap_f;
-  void *swap_m;
-#else
-  int fd;
-  int swap_fd;
-#endif
+  OsMap wmap;        /* vista RO del blob de pesos */
 } Model;
 
 int model_load_g2bx(const char *path, Model *m);
 /* Estimación de RAM sin Model (g2b_info): misma fórmula que model_est_ram. */
 u64 model_est_ram_cfg(const ModelCfg *c, int fa_interval, int kv_q8, int ctx,
-                      int pf_B, u64 tok_bytes);/* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
+                      int pf_B, u64 tok_bytes);
+/* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
 int  vk_worker_main(int argc, char **argv);          /* modo --gpu-worker (proceso hijo) */
 int  vk_dual_start(Model *m, const char *model_path); /* arranca worker (--gpu) */
 void vk_dual_stop(void);
@@ -220,7 +218,6 @@ int model_collect_stats(Model *m, const i32 *toks, i32 n);
 void model_free_stats(Model *m);
 /* ShortGPT: mide Block Influence por capa y marca las `ndrop` menos influyentes. */
 int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop);
-i32 model_sample(f32 *logits, i32 n, f32 temp);
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
 int exp_synth_qwen_tiny(const char *out_path);

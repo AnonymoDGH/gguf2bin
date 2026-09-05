@@ -4,13 +4,7 @@
 #include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
+/* SO (mmap/fopen) via os_mm; aquí no hay #ifdefs de plataforma. */
 #define GGUF_MAGIC 0x46554747u
 #define GGUF_MAX_TENSOR_NAME 1024
 #define GGUF_HDR_SIZE 24
@@ -74,50 +68,22 @@ static u8 *skip_val(u8 *p, const u8 *end, u32 vt){
 }
 int gguf_load(const char *path, GGUF *g){
   memset(g,0,sizeof *g);
-#if !defined(_WIN32)
-  g->fd=-1;
-#endif
-  FILE *f=fopen(path,"rb");
-  if(!f){ fprintf(stderr,"gguf: cannot open %s\n",path); return -1; }
-# if defined(_WIN32)
-  _fseeki64(f,0,SEEK_END); g->size=(size_t)_ftelli64(f); _fseeki64(f,0,SEEK_SET);
-# else
-  fseeko(f,0,SEEK_END); g->size=(size_t)ftello(f); fseeko(f,0,SEEK_SET);
-# endif
-  if(g->size < GGUF_HDR_SIZE){ fprintf(stderr,"gguf: file too small\n"); fclose(f); return -1; }
+  os_map_init(&g->map);
+  u64 fsz=0;
+  if(os_file_size(path,&fsz)){ fprintf(stderr,"gguf: cannot open %s\n",path); return -1; }
+  if(fsz < GGUF_HDR_SIZE){ fprintf(stderr,"gguf: file too small\n"); return -1; }
+  g->size=(size_t)fsz;
   /* mmap preferido: pack de modelos grandes sin copiarlos a RAM */
-  {
-    int mapped=0;
-#if defined(_WIN32)
-    HANDLE hf=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_SEQUENTIAL_SCAN,NULL);
-    if(hf!=INVALID_HANDLE_VALUE){
-      HANDLE hm=CreateFileMappingA(hf,NULL,PAGE_READONLY,0,0,NULL);
-      if(hm){
-        void *v=MapViewOfFile(hm,FILE_MAP_READ,0,0,0);
-        if(v){
-          g->file_handle=(void*)hf; g->map_handle=(void*)hm;
-          g->map_view=v; g->map_size=g->size;
-          g->data=(u8*)v; g->own_data=2; mapped=1;
-        } else { CloseHandle(hm); CloseHandle(hf); }
-      } else CloseHandle(hf);
-    }
-#else
-    int fd=open(path,O_RDONLY);
-    if(fd>=0){
-      void *v=mmap(NULL,g->size,PROT_READ,MAP_PRIVATE,fd,0);
-      if(v!=MAP_FAILED){
-        g->fd=fd; g->map_view=v; g->map_size=g->size;
-        g->data=(u8*)v; g->own_data=2; mapped=1;
-      } else close(fd);
-    }
-#endif
-    if(!mapped){
-      g->data=malloc(g->size);
-      if(!g->data||fread(g->data,1,g->size,f)!=g->size){ fclose(f); free(g->data); g->data=NULL; return -1; }
-      g->own_data=1;
-    }
+  if(os_map_ro(path,&g->map)==0){
+    g->data=(u8*)g->map.view; g->own_data=2;
+  } else {
+    FILE *f=fopen(path,"rb");
+    if(!f){ fprintf(stderr,"gguf: cannot open %s\n",path); return -1; }
+    g->data=malloc(g->size);
+    if(!g->data||fread(g->data,1,g->size,f)!=g->size){ fclose(f); free(g->data); g->data=NULL; return -1; }
+    fclose(f);
+    g->own_data=1;
   }
-  fclose(f);
   const u8 *end=g->data+g->size;
   u8 *p=g->data;
   if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: invalid magic\n"); gguf_free(g); return -1; }
@@ -176,23 +142,12 @@ void gguf_free(GGUF *g){
     free(g->t); g->t=NULL;
   }
   if(g->own_data==2){
-#if defined(_WIN32)
-    if(g->map_view) UnmapViewOfFile(g->map_view);
-    if(g->map_handle) CloseHandle((HANDLE)g->map_handle);
-    if(g->file_handle) CloseHandle((HANDLE)g->file_handle);
-    g->map_view=NULL; g->map_handle=NULL; g->file_handle=NULL;
-#else
-    if(g->map_view && g->map_size) munmap(g->map_view,g->map_size);
-    g->map_view=NULL; g->map_size=0;
-    if(g->fd>=0){ close(g->fd); g->fd=-1; }
-#endif
+    os_unmap(&g->map);
   } else if(g->own_data==1){
     free(g->data);
   }
   g->data=NULL; g->own_data=0; memset(g,0,sizeof *g);
-#if !defined(_WIN32)
-  g->fd=-1;
-#endif
+  os_map_init(&g->map);
 }
 u8 *gguf_tensor_ptr(GGUF *g, GTensor *t){
   if(!g||!t||!g->data) return NULL;

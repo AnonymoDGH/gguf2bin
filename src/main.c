@@ -3,6 +3,7 @@
  * internals directamente; run/chat/bench/info/pack/vkinfo van por sesiones. */
 #include "gguf2bin.h"
 #include "internal/g2b.h"
+#include "internal/opts.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -111,31 +112,20 @@ static int cmd_run(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
-  int gpu=0;
-  i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f; const char *cyber=NULL;
+  float bvh_ratio=0.f; const char *cyber=NULL;
+  OptsCommon co; opts_common_init(&co);
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
   for(int i=3;i<argc;i++){
+    if(opts_common_try(&co,argc,argv,&i)) continue;
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
-    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
-    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
-    else if(!strcmp(argv[i],"--fast")) fast=1;
-    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
-    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
-    else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
-    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-' && strchr(argv[i+1],'.')) bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
     else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
-    else if(!strcmp(argv[i],"--gpu")) gpu=1;
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
       for(tok=strtok(s,","); tok&&np<1024; tok=strtok(NULL,",")) prompt[np++]=atoi(tok);
@@ -145,12 +135,12 @@ static int cmd_run(int argc, char **argv){
     }
   }
   g2b_config cfg;
-  fill_cfg(&cfg,ctx,nthr,q8kv,f32kv,max_ram,swap,fast,mv_ratio,gpu,cyber,seed);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,cyber,co.seed);
   cfg.bvh_keep=bvh_ratio;
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"run: cannot open %s\n",path); return 1; }
-  if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
-  if(ndrop>0) g2b_autodrop(s,ndrop);
+  if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
+  if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
   g2b_model_info fi;
   if(g2b_model_info_of(s,&fi)!=G2B_OK){ g2b_close(s); return 1; }
   if(text[0] && fi.has_tokenizer){
@@ -186,39 +176,24 @@ static int cmd_ppl(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   const char *file=NULL; i32 maxtok=4096;
-  i32 ctx=0; int q8kv=0; int f32kv=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f; const char *cyber=NULL;
+  float bvh_ratio=0.f; const char *cyber=NULL;
+  OptsCommon co; opts_common_init(&co);
   for(int i=3;i<argc;i++){
+    if(opts_common_try(&co,argc,argv,&i)) continue;
     if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
     else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
-    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
-    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
-    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
-    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
-    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-') bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
     else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
   }
   g2b_config cfg;
-  fill_cfg(&cfg,ctx,nthr,q8kv,f32kv,max_ram,swap,0,mv_ratio,0,cyber,0);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,0,co.mv_ratio,0,cyber,0);
   cfg.bvh_keep=bvh_ratio;
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"ppl: cannot open %s\n",path); return 1; }
-  if(ndrop>0) g2b_autodrop(s,ndrop);
+  if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
   char *text=NULL; size_t len=0;
   if(file && strcmp(file,"-")){
-    FILE *f=fopen(file,"rb");
-    if(!f){ fprintf(stderr,"ppl: cannot open %s\n",file); g2b_close(s); return 1; }
-    char buf[65536]; size_t r;
-    while((r=fread(buf,1,sizeof buf,f))>0){
-      char *nt2=realloc(text,len+r+1);
-      if(!nt2){ fprintf(stderr,"ppl: OOM\n"); free(text); fclose(f); g2b_close(s); return 1; }
-      text=nt2; memcpy(text+len,buf,r); len+=r;
-    }
-    fclose(f);
+    if(os_read_file(file,&text,&len)){ fprintf(stderr,"ppl: cannot open %s\n",file); g2b_close(s); return 1; }
   } else {
     char buf[65536]; size_t r;
     while((r=fread(buf,1,sizeof buf,stdin))>0){
@@ -251,37 +226,27 @@ static int cmd_chat(int argc, char **argv){
   int no_think=1; int show_think=0;
   const char *sys_txt="You are a helpful assistant.";
   int no_sys=0;
-  int gpu=0;
-  i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  u64 seed=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f;
+  float bvh_ratio=0.f;
+  OptsCommon co; opts_common_init(&co);
   for(int i=3;i<argc;i++){
+    if(opts_common_try(&co,argc,argv,&i)) continue;
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n_tok=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
-    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
-    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
-    else if(!strcmp(argv[i],"--fast")) fast=1;
-    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
-    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"-t")&&i+1<argc) temp=(f32)atof(argv[++i]);
     else if(!strcmp(argv[i],"--top-k")&&i+1<argc) top_k=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--no-think")) { no_think=1; show_think=0; }
     else if(!strcmp(argv[i],"--think")) { no_think=0; show_think=1; }
-    else if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(u64)strtoull(argv[++i],NULL,10);
-    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--system")&&i+1<argc){ sys_txt=argv[++i]; no_sys=0; }
     else if(!strcmp(argv[i],"--no-system")){ no_sys=1; sys_txt=NULL; }
-    else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   g2b_config cfg;
-  fill_cfg(&cfg,ctx,nthr,q8kv,f32kv,max_ram,swap,fast,mv_ratio,gpu,NULL,seed);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,NULL,co.seed);
   cfg.bvh_keep=bvh_ratio;
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"chat: cannot open %s\n",path); return 1; }
-  if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
-  if(ndrop>0) g2b_autodrop(s,ndrop);
+  if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
+  if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
   g2b_model_info fi;
   if(g2b_model_info_of(s,&fi)!=G2B_OK || !fi.has_tokenizer){
     fprintf(stderr,"chat: model has no tokenizer. Re-pack it\n"); g2b_close(s); return 1;
@@ -312,29 +277,21 @@ static int cmd_chat(int argc, char **argv){
 
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
-  i32 n=32; i32 ctx=0; int q8kv=0; int f32kv=0; int fast=0; u64 max_ram=0; int nthr=0; const char *swap=NULL;
-  int gpu=0;
-  i32 prefill_n=0; int ndrop=0; float mv_ratio=0.f; float bvh_ratio=0.f;
+  i32 n=32;
+  float bvh_ratio=0.f;
+  OptsCommon co; opts_common_init(&co);
+  i32 prefill_n=0;
   for(int i=3;i<argc;i++){
+    if(opts_common_try(&co,argc,argv,&i)) continue;
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--threads")&&i+1<argc) nthr=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-c")||!strcmp(argv[i],"--ctx")) { if(i+1<argc) ctx=atoi(argv[++i]); }
-    else if(!strcmp(argv[i],"--q8-kv")) q8kv=1;
-    else if(!strcmp(argv[i],"--f32-kv")) f32kv=1;
-    else if(!strcmp(argv[i],"--fast")) fast=1;
-    else if(!strcmp(argv[i],"--max-ram")&&i+1<argc) max_ram=(u64)atoll(argv[++i]);
-    else if(!strcmp(argv[i],"--swap")){ swap = (i+1<argc && argv[i+1][0]!='-') ? argv[++i] : "@"; }
     else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--drop")&&i+1<argc) ndrop=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--mv")&&i+1<argc) mv_ratio=(float)atof(argv[++i]);
-    else if(!strcmp(argv[i],"--gpu")) gpu=1;
   }
   g2b_config cfg;
-  fill_cfg(&cfg,ctx,nthr,q8kv,f32kv,max_ram,swap,fast,mv_ratio,gpu,NULL,0);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,NULL,0);
   cfg.bvh_keep=bvh_ratio;
   g2b_session *s=NULL;
   if(g2b_open(argv[2],&cfg,&s)!=G2B_OK){ fprintf(stderr,"bench: cannot open %s\n",argv[2]); return 1; }
-  if(ndrop>0) g2b_autodrop(s,ndrop);
+  if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
   g2b_model_info fi;
   if(g2b_model_info_of(s,&fi)!=G2B_OK){ g2b_close(s); return 1; }
   float dec=0, pre=0;

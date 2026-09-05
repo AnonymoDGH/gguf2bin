@@ -1,5 +1,6 @@
 /* L4 — GGUF → G2BX (formato propio denso, indexado por rol) — v4.7 */
 #include "internal/g2b.h"
+#include "internal/g2bx_io.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -469,19 +470,12 @@ skip_prune:
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }
   }
-  u64 cursor=0; for(u32 i=0;i<ns;i++){ slots[i].off=cursor; cursor=ALIGN64(cursor+slots[i].nbytes); } u64 data_size=cursor;
+  u64 cursor=g2bx_layout_slots(slots,ns); u64 data_size=cursor;
   FILE *o=fopen(out_path,"wb"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
-  u16 ver=G2BX_VER; u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
-  int wr=1; if(fwrite(G2BX_MAGIC,1,4,o)!=4||fwrite(&ver,2,1,o)!=1||fwrite(&arch,1,1,o)!=1||fwrite(&disk_flags,1,1,o)!=1||fwrite(&c,sizeof c,1,o)!=1||fwrite(&ns,4,1,o)!=1) wr=0;
-  wr &= fwrite(slots,sizeof(Slot),ns,o)==ns;
-  u8 *zeros=calloc(64,1); if(!zeros){ free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); fclose(o); gguf_free(&g); return -1; }
-  u64 written=0;
-  for(u32 i=0;i<ns;i++){
-    while(written<slots[i].off){ u64 pad=slots[i].off-written; if(pad>64) pad=64; fwrite(zeros,1,(size_t)pad,o); written+=pad; }
-    wr &= fwrite(src_ptr[i],1,src_sz[i],o)==src_sz[i]; written+=src_sz[i];
-  }
-  while(written<data_size){ u64 pad=data_size-written; if(pad>64) pad=64; wr &= fwrite(zeros,1,(size_t)pad,o)==(size_t)pad; written+=pad; }
-  free(zeros);
+  u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
+  int wr=1;
+  if(g2bx_write_header(o,arch,disk_flags,&c,slots,ns)) wr=0;
+  if(!wr || g2bx_write_blob(o,slots,ns,src_ptr,src_sz,data_size)) wr=0;
   Tokenizer tk; if(tok_from_gguf(&g,&tk)==0){ tok_write_section(o,&tk); fprintf(stderr,"  tokenizer: %d tokens, %d merges (bos=%d eos=%d)\n",tk.n,tk.nmerges,tk.bos,tk.eos); tok_free(&tk); } else fprintf(stderr,"  tokenizer: unavailable\n");
   fclose(o);
   if(!wr){ fprintf(stderr,"g2bx: write error on %s (disk full?)\n",out_path); }
@@ -490,23 +484,20 @@ skip_prune:
 }
 int g2bx_info(const char *path){
   FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"g2bx: cannot open %s\n",path); return -1; }
-  char magic[4]; u16 ver; u8 arch,flags; ModelCfg c; u32 ns;
-  memset(&c,0,sizeof c);
-  if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)||fread(&ver,2,1,f)!=1||fread(&arch,1,1,f)!=1||fread(&flags,1,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
-  if(ver==0||ver>G2BX_VER_MAX){ fprintf(stderr,"g2bx: unsupported version %u (max %u)\n",ver,G2BX_VER_MAX); fclose(f); return -1; }
-  if(ver>=2){ if(fread(&c,sizeof c,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; } }
-  else { if(fread(&c,G2BX_CFG_V1,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; } }
-  if(fread(&ns,4,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
+  G2bxHeader h;
+  int hrc=g2bx_read_header(f,&h);
+  if(hrc==-2){ fprintf(stderr,"g2bx: unsupported version %u (max %u)\n",h.ver,G2BX_VER_MAX); fclose(f); return -1; }
+  if(hrc){ fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
+  u16 ver=h.ver; u8 arch=h.arch, flags=h.flags; ModelCfg c=h.cfg; u32 ns=h.n_slots;
   static const char *an[]={"llama","qwen2","qwen3","lfm2","qwen35"}; printf("G2BX v%u arch=%s flags=0x%02x\n",ver, arch<5?an[arch]:"?",flags);
   printf("  dim=%d hidden=%d layers=%d heads=%d kv=%d head_dim=%d\n",c.dim,c.hidden_dim,c.n_layers,c.n_heads,c.n_kv_heads,c.head_dim);
   printf("  vocab=%d seq=%d eps=%g rope_theta=%.0f\n",c.vocab,c.seq_len,c.eps,c.rope_theta);
-  printf("  slots=%u\n",ns); Slot *sl=malloc(ns*sizeof(Slot));
-  if(!sl || fread(sl,sizeof(Slot),ns,f)!=ns){ free(sl); fclose(f); return -1; }
+  printf("  slots=%u\n",ns); Slot *sl=h.slots;
   static const char *rn[]={"tok_embd","out_norm","output","attn_norm","attn_q","attn_k","attn_v",
     "attn_o","attn_q_norm","attn_k_norm","ffn_norm","ffn_gate","ffn_up","ffn_down",
     "attn_q_bias","attn_k_bias","attn_v_bias","embd_norm","conv_w","conv_in","conv_out",
     "attn_qkv","attn_gate","ssm_a","ssm_dt","ssm_conv1d","ssm_alpha","ssm_beta","ssm_norm","ssm_out"};
   u64 total=0; for(u32 i=0;i<ns;i++){ const char *r=sl[i].role<R_COUNT?rn[sl[i].role]:"?"; if(sl[i].layer==0xFFFF) printf("  [%u] %-12s global type=%u %u B off=%llu\n",i,r,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); else printf("  [%u] %-12s L%-4u type=%u %u B off=%llu\n",i,r,sl[i].layer,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); total+=sl[i].nbytes; }
-  printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); free(sl); fclose(f); return 0;
+  printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); g2bx_header_free(&h); fclose(f); return 0;
 }
 int g2bx_read_cfg_gguf(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){ return read_cfg(g,c,arch,flags); }

@@ -28,8 +28,7 @@ void rmsnorm(f32 *o, f32 *x, f32 *w, i32 n, f32 eps){
     ss0=_mm256_fmadd_ps(x0,x0,ss0); ss1=_mm256_fmadd_ps(x1,x1,ss1); ss2=_mm256_fmadd_ps(x2,x2,ss2); ss3=_mm256_fmadd_ps(x3,x3,ss3);
   }
   __m256 ss=_mm256_add_ps(_mm256_add_ps(ss0,ss1),_mm256_add_ps(ss2,ss3));
-  __m128 slo=_mm_add_ps(_mm256_castps256_ps128(ss),_mm256_extractf128_ps(ss,1)); slo=_mm_add_ps(slo,_mm_movehl_ps(slo,slo)); slo=_mm_add_ss(slo,_mm_shuffle_ps(slo,slo,1));
-  f32 sum=_mm_cvtss_f32(slo);
+  f32 sum=hsum_ps(ss);
   for(;j<n;j++) sum+=x[j]*x[j]; /* cola completa: n no multiple de 32 */
 #else
   f32 sum=0; for(i32 j=0;j<n;j++) sum+=x[j]*x[j];
@@ -91,9 +90,7 @@ void softmax(f32 *x, i32 n){
     __m256 e=exp256(_mm256_add_ps(_mm256_loadu_ps(x+j),vm));
     _mm256_storeu_ps(x+j,e); vs=_mm256_add_ps(vs,e);
   }
-  __m128 slo=_mm_add_ps(_mm256_castps256_ps128(vs),_mm256_extractf128_ps(vs,1));
-  slo=_mm_add_ps(slo,_mm_movehl_ps(slo,slo)); slo=_mm_add_ss(slo,_mm_shuffle_ps(slo,slo,1));
-  f32 s=_mm_cvtss_f32(slo);
+  f32 s=hsum_ps(vs);
   for(;j<n;j++){ x[j]=expf(x[j]-m); s+=x[j]; }
   f32 inv=1.f/s;
   __m256 vi=_mm256_set1_ps(inv);
@@ -198,8 +195,7 @@ void qk_rmsnorm(f32 *x, const f32 *w, i32 n_heads, i32 head_dim, f32 eps){
       ss0=_mm256_fmadd_ps(x0,x0,ss0); ss1=_mm256_fmadd_ps(x1,x1,ss1); ss2=_mm256_fmadd_ps(x2,x2,ss2); ss3=_mm256_fmadd_ps(x3,x3,ss3);
     }
     __m256 ss=_mm256_add_ps(_mm256_add_ps(ss0,ss1),_mm256_add_ps(ss2,ss3));
-    __m128 slo=_mm_add_ps(_mm256_castps256_ps128(ss),_mm256_extractf128_ps(ss,1)); slo=_mm_add_ps(slo,_mm_movehl_ps(slo,slo)); slo=_mm_add_ss(slo,_mm_shuffle_ps(slo,slo,1));
-    f32 sum=_mm_cvtss_f32(slo);
+    f32 sum=hsum_ps(ss);
     for(;j<head_dim;j++) sum+=xh[j]*xh[j];
     f32 inv=1.f/sqrtf(sum/head_dim+eps);
     __m256 vinv=_mm256_set1_ps(inv);

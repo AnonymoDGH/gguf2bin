@@ -6,6 +6,8 @@
  * salida (los harnesses qkcheck/prefilltest/kvtest son los guardianes).
  */
 #include "internal/g2b.h"
+#include "internal/g2bx_io.h"
+#include "internal/sampler.h"
 #include "gguf2bin.h"
 #include <stdlib.h>
 #include <string.h>
@@ -22,17 +24,11 @@
 #endif
 
 /* ── sesión ─────────────────────────────────────────────────────────── */
-typedef struct { int id; float logit; } G2bTokLogit;
 struct g2b_session {
   Model m;
   g2b_config cfg;
   char *src_path;
-  /* sampler por sesión (antes: globales en main.c) */
-  u64 rng;
-  G2bTokLogit *samp_buf;
-  int samp_cap;
-  u8 *seen;
-  int seen_n;
+  Sampler samp; /* RNG + scratch de muestreo (Fase 2: módulo único) */
   /* chat: historial + plantilla + cursores (antes: locales de cmd_chat) */
   i32 *conv;
   i32 cn, ccap, pos, fed, sys_len;
@@ -137,113 +133,6 @@ static i32 find_tok(Tokenizer *t, const char *s){
   return -1;
 }
 
-/* ── sampler por sesión (movido de main.c, sin cambios de matemática) ── */
-static void rng_seed(g2b_session *s, u64 seed){
-  s->rng = seed ? seed : (0x9E3779B97F4A7C15ull ^ (u64)time(NULL));
-  for(int i=0;i<4;i++){ s->rng^=s->rng>>12; s->rng^=s->rng<<25; s->rng^=s->rng>>27; }
-}
-static inline float rnd_f(g2b_session *s){
-  s->rng^=s->rng>>12; s->rng^=s->rng<<25; s->rng^=s->rng>>27;
-  return (float)(((s->rng*2685821657736338717ull)>>40)*(1.0/16777216.0));
-}
-static void apply_repeat_penalty(g2b_session *s, float *logits, int n,
-                                 float penalty, const i32 *recent, int recent_n){
-  if(penalty==1.f || !recent || recent_n<=0) return;
-  if(s->seen_n<n){ free(s->seen); s->seen=(u8*)calloc((size_t)n,1); s->seen_n=s->seen?n:0; }
-  if(!s->seen){
-    for(int i=0;i<recent_n;i++){
-      int id=recent[i]; if(id<0||id>=n) continue;
-      float v=logits[id]; logits[id]=v>0?v/penalty:v*penalty;
-    }
-    return;
-  }
-  memset(s->seen,0,(size_t)n);
-  for(int i=0;i<recent_n;i++){
-    int id=recent[i]; if(id<0||id>=n||s->seen[id]) continue;
-    s->seen[id]=1;
-    float v=logits[id]; logits[id]=v>0?v/penalty:v*penalty;
-  }
-}
-static void topk_select2(G2bTokLogit *a, int n, int k){
-  if(k<=0 || k>=n) return;
-  int lo=0, hi=n-1;
-  while(lo<hi){
-    int mid=lo+(hi-lo)/2;
-    if(a[mid].logit>a[lo].logit){ G2bTokLogit t=a[mid]; a[mid]=a[lo]; a[lo]=t; }
-    if(a[hi].logit>a[lo].logit){ G2bTokLogit t=a[hi]; a[hi]=a[lo]; a[lo]=t; }
-    if(a[hi].logit>a[mid].logit){ G2bTokLogit t=a[hi]; a[hi]=a[mid]; a[mid]=t; }
-    float p=a[mid].logit;
-    int i=lo, j=hi;
-    while(i<=j){
-      while(a[i].logit>p) i++;
-      while(a[j].logit<p) j--;
-      if(i<=j){ G2bTokLogit t=a[i]; a[i]=a[j]; a[j]=t; i++; j--; }
-    }
-    if(k<=j) hi=j;
-    else if(k>=i) lo=i;
-    else break;
-  }
-}
-static int cmp_logit_desc(const void *x, const void *y){
-  float a=((const G2bTokLogit*)x)->logit, b=((const G2bTokLogit*)y)->logit;
-  return (a<b)-(a>b);
-}
-static int gumbel_sample(g2b_session *s, const float *logits, int n){
-  int bi=0; float bs=-1e30f;
-  for(int i=0;i<n;i++){
-    float u=rnd_f(s); if(u<1e-7f) u=1e-7f; else if(u>0.9999999f) u=0.9999999f;
-    float v=logits[i]-logf(-logf(u));
-    if(v>bs){ bs=v; bi=i; }
-  }
-  return bi;
-}
-static i32 sample_advanced(g2b_session *s, float *logits, int n, float temp,
-                           int top_k, float top_p, float repeat_penalty,
-                           const i32 *recent, int recent_n){
-  if(n<=0) return 0;
-  apply_repeat_penalty(s,logits,n,repeat_penalty,recent,recent_n);
-  if(temp<=0.f){
-    int bi=0; float bv=logits[0];
-    for(int i=1;i<n;i++) if(logits[i]>bv){ bv=logits[i]; bi=i; }
-    return bi;
-  }
-  for(int i=0;i<n;i++) logits[i]/=temp;
-  if(top_k<=0 || top_k>=n){
-    if(top_p>=1.f) return gumbel_sample(s,logits,n);
-  }
-  G2bTokLogit *arr=NULL;
-  if(s->samp_cap>=n) arr=s->samp_buf;
-  else {
-    free(s->samp_buf);
-    s->samp_buf=malloc((size_t)n*sizeof(*s->samp_buf));
-    s->samp_cap=s->samp_buf?n:0;
-    arr=s->samp_buf;
-  }
-  if(!arr) return gumbel_sample(s,logits,n);
-  for(int i=0;i<n;i++){ arr[i].id=i; arr[i].logit=logits[i]; }
-
-  int keep=n;
-  if(top_k>0 && top_k<n){
-    topk_select2(arr,n,top_k);
-    for(int i=1;i<top_k;i++){ G2bTokLogit v=arr[i]; int j=i-1; while(j>=0&&arr[j].logit<v.logit){ arr[j+1]=arr[j]; j--; } arr[j+1]=v; }
-    keep=top_k;
-  } else {
-    qsort(arr,(size_t)n,sizeof(arr[0]),cmp_logit_desc);
-  }
-  float maxl=arr[0].logit, sum=0.f;
-  for(int i=0;i<keep;i++){ float e=expf(arr[i].logit-maxl); arr[i].logit=e; sum+=e; }
-  if(top_p<1.f){
-    float cum=0.f; int last=keep;
-    for(int i=0;i<keep;i++){ cum+=arr[i].logit/sum; if(cum>=top_p){ last=i+1; break; } }
-    keep=last;
-    sum=0.f; for(int i=0;i<keep;i++) sum+=arr[i].logit;
-  }
-  float r=rnd_f(s)*sum, cum=0.f;
-  int id=arr[keep-1].id;
-  for(int i=0;i<keep;i++){ cum+=arr[i].logit; if(r<=cum){ id=arr[i].id; break; } }
-  return id;
-}
-
 /* ── RAM opts (movido de main.c) ────────────────────────────────────── */
 static int apply_ram_opts(Model *m, i32 ctx, u64 max_ram, int q8kv, int f32kv, const char *swap){
   int realloc=0;
@@ -278,6 +167,7 @@ g2b_error g2b_open(const char *path, const g2b_config *cfg, g2b_session **out){
   { FILE *t=fopen(path,"rb"); if(!t) return G2B_ERR_IO; fclose(t); }
   g2b_session *s=calloc(1,sizeof *s);
   if(!s) return G2B_ERR_OOM;
+  sampler_init(&s->samp);
   if(cfg) s->cfg=*cfg;
   s->src_path=strdup(path);
   if(!s->src_path){ free(s); return G2B_ERR_OOM; }
@@ -305,14 +195,14 @@ g2b_error g2b_open(const char *path, const g2b_config *cfg, g2b_session **out){
   { int nthr=s->cfg.threads;
     if(s->cfg.fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr); }
   if(s->m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", s->m.mv_ratio);
-  rng_seed(s, s->cfg.seed);
+  sampler_seed(&s->samp, s->cfg.seed);
   *out=s;
   return G2B_OK;
 }
 void g2b_close(g2b_session *s){
   if(!s) return;
   model_free(&s->m);
-  free(s->src_path); free(s->samp_buf); free(s->seen);
+  free(s->src_path); sampler_free(&s->samp);
   free(s->conv); free(s->logits);
   free(s);
 }
@@ -365,47 +255,19 @@ g2b_error g2b_info(const char *path, g2b_model_info *out){
   if(is_g2bx(path)){
     FILE *f=fopen(path,"rb");
     if(!f) return G2B_ERR_IO;
-    char magic[4]; u16 ver; u8 arch, flags;
-    if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)
-       ||fread(&ver,2,1,f)!=1||fread(&arch,1,1,f)!=1||fread(&flags,1,1,f)!=1){
-      fclose(f); return G2B_ERR_FORMAT;
-    }
-    if(ver==0||ver>G2BX_VER_MAX){ fclose(f); return G2B_ERR_FORMAT; }
-    ModelCfg c; memset(&c,0,sizeof c);
-    if(ver>=2){ if(fread(&c,sizeof c,1,f)!=1){ fclose(f); return G2B_ERR_FORMAT; } }
-    else if(fread(&c,G2BX_CFG_V1,1,f)!=1){ fclose(f); return G2B_ERR_FORMAT; }
-    u32 nsl=0;
-    if(fread(&nsl,4,1,f)!=1||nsl==0||nsl>(1u<<20)){ fclose(f); return G2B_ERR_FORMAT; }
-    u64 wsum=0, max_end=0;
-    for(u32 i=0;i<nsl;i++){
-      u8 role, type; u16 layer; u32 nb; u64 off;
-      if(fread(&role,1,1,f)!=1||fread(&layer,2,1,f)!=1||fread(&type,1,1,f)!=1
-         ||fread(&nb,4,1,f)!=1||fread(&off,8,1,f)!=1){ fclose(f); return G2B_ERR_FORMAT; }
-      wsum+=nb;
-      if(nb && off<=UINT64_MAX-nb){ u64 e=off+nb; if(e>max_end) max_end=e; }
-    }
-    /* tokenizer presente si el archivo se extiende más allá del blob */
-    long hpos=ftell(f);
-    fseek(f,0,SEEK_END); long fsz=ftell(f);
-    int hastok=0; u64 tokbytes=0;
-    i32 tbos=-1, teos=-1;
-    u64 data_start=hpos>0?(u64)hpos:0;
-    u64 al=((max_end+63ull)&~63ull);
-    if(hpos>0 && (u64)fsz>data_start+al+8){
-      fseek(f,(long)(data_start+al),SEEK_SET);
-      u32 nv=0,nm=0; i32 b=-1,e=-1,u=0;
-      if(fread(&nv,4,1,f)==1&&fread(&nm,4,1,f)==1&&fread(&b,4,1,f)==1
-         &&fread(&e,4,1,f)==1&&fread(&u,4,1,f)==1&&nv<=(1u<<20)&&nm<=(1u<<20)){
-        hastok=1; tbos=b; teos=e;
-        tokbytes=(u64)(nv+nm)*48u + ((u64)1u<<19)*(8u+4u)*2u;
-      }
-    }
+    G2bxHeader h;
+    int hrc=g2bx_read_header(f,&h);
     fclose(f);
+    if(hrc) return G2B_ERR_FORMAT;
+    ModelCfg c=h.cfg;
     if(c.n_kv_heads<=0) c.n_kv_heads=c.n_heads;
     if(c.head_dim<=0 && c.n_heads>0) c.head_dim=c.dim/c.n_heads;
+    u64 tokbytes=h.has_tok
+      ? (u64)(h.tok_nv+h.tok_nm)*48u + ((u64)1u<<19)*(8u+4u)*2u : 0;
     int ctx=c.seq_len>0?c.seq_len:2048;
-    u64 est=model_est_ram_cfg(&c,c.fa_interval,(flags&F_KV_Q8)?1:0,ctx,16,tokbytes);
-    fill_info_from_cfg(out,&c,arch,tbos,teos,wsum,est,hastok);
+    u64 est=model_est_ram_cfg(&c,c.fa_interval,(h.flags&F_KV_Q8)?1:0,ctx,16,tokbytes);
+    fill_info_from_cfg(out,&c,h.arch,h.tok_bos,h.tok_eos,h.weight_bytes,est,h.has_tok);
+    g2bx_header_free(&h);
     return G2B_OK;
   }
   /* GGUF: metadata (mmap, sin cargar tensores a RAM) */
@@ -470,7 +332,7 @@ char *g2b_decode(g2b_session *s, const int32_t *ids, int n){
 g2b_error g2b_generate(g2b_session *s, const int32_t *toks, int n_toks,
                        const g2b_gen_params *p){
   if(!s || !p) return G2B_ERR_IO;
-  if(p->seed) rng_seed(s,p->seed);
+  if(p->seed) sampler_seed(&s->samp,p->seed);
   Model *m=&s->m;
   int rep_win=p->repeat_window>0?p->repeat_window:G2B_REP_WIN;
   if(rep_win>128) rep_win=128;
@@ -503,7 +365,7 @@ g2b_error g2b_generate(g2b_session *s, const int32_t *toks, int n_toks,
     if(pos >= m->ctx) break;
     int a=recent_n>rep_win?recent_n-rep_win:0, rp_n=0;
     for(int k=a;k<recent_n && rp_n<128;k++) rep_tmp[rp_n++]=recent_ring[k%128];
-    i32 next=sample_advanced(s,logits,m->c.vocab,p->temp,p->top_k,p->top_p,
+    i32 next=sampler_sample(&s->samp,logits,m->c.vocab,p->temp,p->top_k,p->top_p,
                              p->repeat_penalty,rep_tmp,rp_n);
     if(p->on_token){
       if(m->tok){
@@ -598,7 +460,7 @@ g2b_error g2b_chat_turn(g2b_session *s, const char *user_utf8,
                         const g2b_gen_params *p){
   if(!s || !user_utf8 || !p) return G2B_ERR_IO;
   if(!s->conv || !s->logits) return G2B_ERR_CONTEXT;
-  if(p->seed) rng_seed(s,p->seed);
+  if(p->seed) sampler_seed(&s->samp,p->seed);
   Model *m=&s->m;
   Tokenizer *tk=m->tok;
   /* formatea el turno */
@@ -667,7 +529,7 @@ g2b_error g2b_chat_turn(g2b_session *s, const char *user_utf8,
     if(s->pos >= m->ctx) break;
     int a=rep_n>rep_win?rep_n-rep_win:0, rp_n=0;
     for(int k=a;k<rep_n && rp_n<128;k++) rep_tmp[rp_n++]=rep_ring[k%128];
-    i32 nxt=sample_advanced(s,s->logits,m->c.vocab,p->temp,p->top_k,p->top_p,
+    i32 nxt=sampler_sample(&s->samp,s->logits,m->c.vocab,p->temp,p->top_k,p->top_p,
                             p->repeat_penalty,rep_tmp,rp_n);
     if(nxt==s->eos || nxt==s->turn_end || nxt==s->turn_start) break;
     if(s->tpl_llama && (nxt==s->hstart || nxt==s->eot || nxt==s->hend)) break;
@@ -749,21 +611,6 @@ g2b_error g2b_ppl(g2b_session *s, const char *text, int max_tokens,
 }
 
 /* ── pack ─────────────────────────────────────────────────────────── */
-static int read_file_all(const char *path, char **out, size_t *out_len){
-  FILE *f=fopen(path,"rb");
-  if(!f) return -1;
-  char *t=NULL; size_t len=0;
-  char buf[16384]; size_t r;
-  while((r=fread(buf,1,sizeof buf,f))>0){
-    char *nt=realloc(t,len+r+1);
-    if(!nt){ free(t); fclose(f); return -1; }
-    t=nt; memcpy(t+len,buf,r); len+=r;
-  }
-  fclose(f);
-  if(t) t[len]=0;
-  *out=t; if(out_len) *out_len=len;
-  return 0;
-}
 g2b_error g2b_pack(const char *gguf, const char *out, const g2b_pack_opts *o){
   if(!gguf || !out) return G2B_ERR_IO;
   int downq4=0; float prune=0.f; const char *calib=NULL; int oq=0;
@@ -784,7 +631,7 @@ g2b_error g2b_pack(const char *gguf, const char *out, const g2b_pack_opts *o){
   model_set_ctx(&m,ctx);
   char *text=NULL; size_t len=0;
   if(calib){
-    if(!read_file_all(calib,&text,&len)){ if(!len){ free(text); text=NULL; len=0; } }
+    if(!os_read_file(calib,&text,&len)){ if(!len){ free(text); text=NULL; len=0; } }
     else fprintf(stderr,"pack: cannot open %s - using embedded corpus\n",calib);
   }
   if(!text || len==0){ text=(char*)G2B_DEFAULT_CALIB; len=strlen(G2B_DEFAULT_CALIB); }

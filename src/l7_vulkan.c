@@ -441,7 +441,7 @@ int vk_worker_main(int argc,char **argv){
   u32 wtype=(u32)atoi(argv[7]);
   if(vk_init()) return 3;                     /* puede colgar/crashear: padre lo tolera */
   FILE *f=fopen(model,"rb");
-  if(!f||_fseeki64(f,(i64)off,SEEK_SET)){ if(f)fclose(f); return 4; }
+  if(!f||os_fseek(f,(i64)off,SEEK_SET)){ if(f)fclose(f); return 4; }
   u8 *w=malloc((size_t)len);
   if(!w||fread(w,1,(size_t)len,f)!=(size_t)len){ fclose(f); free(w); return 5; }
   fclose(f);
@@ -534,8 +534,8 @@ static u64 g2bx_cfg_bytes_on_disk(const char *path){
   return cfg;
 }
 static u64 g2bx_blob_file_off(const Model *m, const char *path_hint){
-  if(m->use_mmap && m->map_view && m->data)
-    return (u64)((const u8*)m->data - (const u8*)m->map_view);
+  if(m->use_mmap && m->wmap.view && m->data)
+    return (u64)((const u8*)m->data - (const u8*)m->wmap.view);
   return 4ull+2ull+1ull+1ull+g2bx_cfg_bytes_on_disk(path_hint)+4ull+(u64)m->n_slots*(u64)sizeof(Slot);
 }
 int vk_dual_start(Model *m,const char *model_path){
