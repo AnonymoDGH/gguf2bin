@@ -93,6 +93,28 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row);
 void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0, i32 r1);
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B); /* out[B*d] */
 void matmul(f32 *xout, f32 *x, f32 *w, i32 n, i32 d);
+/* Kernels con tipo (para la tabla de dispatch y sus tests). Solo AVX2 salvo
+ * q4_0/q8_0 (tienen fallback escalar con el mismo nombre). */
+void matmul_q4_0s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_q4_0s_psy(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_q4_vvc(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_iq1_s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_q3_K(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
+void matmul_q4_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q8_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q4_0s_psy_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q4_vvc_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_iq1_s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q3_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q5_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q4_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+void matmul_q6_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B);
+/* Tabla de dispatch (l2_codec.c): dec==NULL → bat(...,1); sin entrada → fallback. */
+typedef void (*qmat_dec_fn)(f32*, const f32*, const u8*, i32, i32);
+typedef void (*qmat_bat_fn)(f32*, const f32*, const u8*, i32, i32, i32);
+typedef struct { u32 type; qmat_dec_fn dec; qmat_bat_fn bat; } QMatDispatch;
+const QMatDispatch *qmat_lookup(u32 type);
 u64  row_stride(u32 type, i32 n);
 void q8_dequant_row_avx2(const u8 *src, f32 *out, i32 n);
 void rmsnorm(f32 *o, f32 *x, f32 *w, i32 n, f32 eps);

@@ -101,3 +101,24 @@ el decode está limitado por BYTES, no por ALU. Todo lo que añada tráfico
   por bloques en ctx>1k, R10 especulativo) o menos pesos/token (--mv/--prune,
   ya existen con su tradeoff). R6 exige antes un harness de bench en ctx
   largo (el bench actual cicla pos<32) + validación de calidad.
+
+## Fase 6 (2026-09-05): unificación parcial — la plantilla total, rechazada
+- Hecho: tabla de dispatch única (`qmat_lookup`: 11 tipos; B2 fixed — `rows`
+  ya no deja `out` sin escribir; eliminada línea duplicada T_Q4_0S) +
+  helpers de preámbulo (`q4_decode_setup`/`q4_batch_setup`, 13 sitios) +
+  test de wiring en selftest (direcciones exactas + rows-vs-directo + B2).
+  qkcheck 46/46 + suite bit-idéntica.
+- Rechazado (argumentado): macro-plantilla única Q4_0/Q4_0S/PSY. Los loops
+  difieren en unroll (4 vs 8) y blocking (por-32 vs por-superbloque;
+  token-outer vs G-grupos en _b) de forma INTENCIONAL (tuning medido).
+  Forzarlos a una plantilla añade ramas al hot loop o macro-soup ilegible,
+  con riesgo en hardware al límite del bus y cero ganancia funcional. Lo
+  compartible de verdad (primitivas Q4_BLK_*, preámbulos, dispatch) ya está
+  compartido; los cuerpos quedan libres para evolucionar por formato.
+- Bug cazado por el camino (lección): al extraer el preámbulo se pasó
+  `g_q4sum` como argumento — evaluado ANTES del posible realloc en
+  `q4_scratch` (use-after-free en crecimiento; detonaba como heap-corrupt
+  flaky solo en secuencias small→big). Regla: los globales realojables se
+  leen DENTRO (tras asegurar), nunca como argumento. El harness que lo
+  habría cazado en el acto: secuencia multi-tamaño en un solo proceso
+  (q4bcheck ya la tenía — por eso se detectó aquí y no en producción).

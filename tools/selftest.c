@@ -206,8 +206,70 @@ static void t_g2bx_v3(const char *tmp){
   }
 }
 
-static void t_opts(void){
-  OptsCommon o; opts_common_init(&o);
+/* Dispatch: cada tipo cableado al kernel exacto (el bug v4.9 era un kernel
+ * nunca despachado; B2 era silencio en rows). Direcciones + numérico. */
+static void t_dispatch(void){
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  struct { u32 ty; qmat_dec_fn dec; qmat_bat_fn bat; } want[] = {
+    {T_Q4_0, matmul_q4_0, matmul_q4_0_b},
+    {T_Q8_0, matmul_q8_0, matmul_q8_0_b},
+    {T_Q4_0S, matmul_q4_0s, matmul_q4_0s_b},
+    {T_Q4_0S_PSY, matmul_q4_0s_psy, matmul_q4_0s_psy_b},
+    {T_Q4_VVC, matmul_q4_vvc, matmul_q4_vvc_b},
+    {T_IQ1_S, matmul_iq1_s, matmul_iq1_s_b},
+    {T_Q3_K, matmul_q3_K, matmul_q3_K_b},
+    {T_Q5_0, NULL, matmul_q5_0_b},
+    {T_Q4_K, NULL, matmul_q4_K_b},
+    {T_Q6_K, NULL, matmul_q6_K_b},
+  };
+  for(unsigned i=0;i<sizeof want/sizeof want[0];i++){
+    const QMatDispatch *e=qmat_lookup(want[i].ty);
+    CHECK(e!=NULL,"dispatch tiene entrada");
+    if(e){ CHECK(e->dec==want[i].dec,"dispatch dec"); CHECK(e->bat==want[i].bat,"dispatch bat"); }
+  }
+#endif
+  CHECK(qmat_lookup(T_Q4_1)==NULL,"Q4_1 sin kernel (fallback)");
+  CHECK(qmat_lookup(T_Q8_1)==NULL,"Q8_1 sin kernel (fallback)");
+  CHECK(qmat_lookup(T_IQ2_XXS)==NULL,"IQ2_XXS sin kernel (fallback)");
+  CHECK(qmat_lookup(0xFF)==NULL,"tipo absurdo sin kernel");
+
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  /* rows() sobre Q4_0S == directo sobre el rango (aritmética de offsets) */
+  {
+    int n=256, d=4;
+    uint8_t *w=calloc((size_t)d*130,1);
+    float x[256], o1[4], o2[4];
+    for(int i=0;i<256;i++) x[i]=1.f;
+    for(int i=0;i<4;i++){ o1[i]=12345.f; o2[i]=12345.f; }
+    if(w){
+      for(int r=0;r<d;r++){ w[r*130]=0x00; w[r*130+1]=0x3C; memset(w+r*130+2,0x99,128); }
+      matmul_q4_0s(o2,x,w,n,d);
+      matmul_q_rows(o1,x,w,T_Q4_0S,n,1,3);
+      CHECK(o1[0]==12345.f,"rows no toca fuera de rango");
+      CHECK(o1[3]==12345.f,"rows no toca fuera de rango (fin)");
+      CHECK(o1[1]==o2[1] && o1[2]==o2[2],"rows == directo en rango");
+      free(w);
+    }
+  }
+  /* B2: rows() sobre tipo sin kernel (Q4_1) ESCRIBE (antes: silencio) */
+  {
+    int n=64, d=2;
+    uint8_t *w=calloc((size_t)d*2*20,1);
+    float x[64], o[2];
+    for(int i=0;i<64;i++) x[i]=1.f;
+    o[0]=o[1]=12345.f;
+    if(w){
+      for(int r=0;r<d*2;r++){ w[r*20]=0x00; w[r*20+1]=0x3C; memset(w+r*20+2,0x99,18); }
+      matmul_q_rows(o,x,w,T_Q4_1,n,0,2);
+      CHECK(o[0]!=12345.f && o[1]!=12345.f,"B2: rows escribe fallback");
+      CHECK(o[0]==o[1],"B2: determinista y finito (NaN fallaría aquí)");
+      free(w);
+    }
+  }
+#endif
+}
+
+static void t_opts(void){  OptsCommon o; opts_common_init(&o);
   char *av[]={"prog","-c","512","--threads","4","--q8-kv","--fast",
               "--max-ram","2048","--swap","--seed","7","--drop","2",
               "--mv","0.5","--gpu","--f32-kv","--ctx","1024","zzz"};
@@ -243,6 +305,7 @@ int main(int argc, char **argv){
   t_os(argv[1],tmp);
   t_g2bx(argv[1],tmp);
   t_g2bx_v3(tmp);
+  t_dispatch();
   t_opts();
   if(fails){ fprintf(stderr,"selftest: %d FALLOS\n",fails); return 1; }
   printf("selftest: OK\n");

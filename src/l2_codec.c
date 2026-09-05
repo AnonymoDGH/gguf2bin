@@ -727,15 +727,34 @@ static void q4_quant_act(const f32 *x, i32 n, u8 *q8, f32 *q8d, f32 *sum16){
     }
   }
 }
+/* Preámbulo compartido de los kernels decode (Fase 6): scratch + act Q8.
+ * 0 ok; -1 OOM (out a cero, como el código original). */
+static int q4_decode_setup(i32 n, i32 d, f32 *out, const f32 *x, u8 **q8, f32 **q8d){
+  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return -1; }
+  *q8=g_q4act; *q8d=g_q4scl;
+  q4_quant_act(x,n,*q8,*q8d,NULL);
+  return 0;
+}
+/* Idem batcheado (use_sum16!=0: la corrección m·Σx de K-quants/Q4_0).
+ * OJO: g_q4sum se lee DENTRO (tras q4_scratch, que puede realojarlo);
+ * pasarlo como argumento lo evaluaría antes del realloc (use-after-free). */
+static int q4_batch_setup(const f32 *x, i32 n, i32 d, i32 B, f32 *out,
+                          u8 **q8, f32 **q8d, int use_sum16){
+  if(B<=0 || !q4_scratch(n*B)){ memset(out,0,(size_t)B*(size_t)d*sizeof(f32)); return -1; }
+  *q8=g_q4act; *q8d=g_q4scl;
+  for(i32 t=0;t<B;t++)
+    q4_quant_act(x+(size_t)t*n,n,*q8+(size_t)t*n,*q8d+(size_t)t*(n/32),
+                 use_sum16?g_q4sum+(size_t)t*(n/16):NULL);
+  return 0;
+}
 void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb = n/32;
   const __m128i mask0F = _mm_set1_epi8(0x0F);
   const __m256i onei8 = _mm256_set1_epi8(1);
   const __m256i ones16 = _mm256_set1_epi16(1);
   const __m256i eight16 = _mm256_set1_epi16(8);
-  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  q4_quant_act(x,n,q8,q8d,NULL);
+  u8 *q8; f32 *q8d;
+  if(q4_decode_setup(n,d,out,x,&q8,&q8d)) return;
 /* Bloque Q4 (32 elems): nibbles 0..15 (valor real = nibble-8) x activación int8.
    EXPAND desempaqueta una vez; DOT lo reusa para G tokens (prefill bloqueado). */
 #define Q4_BLK_EXPAND(rp,off,q4u) do{ \
@@ -801,10 +820,8 @@ void matmul_q4_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
   const __m256i onei8 = _mm256_set1_epi8(1);
   const __m256i ones16 = _mm256_set1_epi16(1);
   const __m256i eight16 = _mm256_set1_epi16(8);
-  if(!q4_scratch(n*B)){ memset(out,0,(size_t)B*(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  for(i32 t=0;t<B;t++)
-    q4_quant_act(x+(size_t)t*n,n,q8+(size_t)t*n,q8d+(size_t)t*(n/32),g_q4sum+(size_t)t*(n/16));
+  u8 *q8; f32 *q8d;
+  if(q4_batch_setup(x,n,d,B,out,&q8,&q8d,1)) return;
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row0 = w + (size_t)i*(size_t)nb*18;
@@ -842,9 +859,8 @@ void matmul_q4_0s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb=n/32, nsb=n/256;
   const __m128i mask0F=_mm_set1_epi8(0x0F);
   const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
-  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  q4_quant_act(x,n,q8,q8d,NULL);
+  u8 *q8; f32 *q8d;
+  if(q4_decode_setup(n,d,out,x,&q8,&q8d)) return;
   #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)nsb*130;
@@ -880,10 +896,8 @@ void matmul_q4_0s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
   i32 nb=n/32, nsb=n/256;
   const __m128i mask0F=_mm_set1_epi8(0x0F);
   const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
-  if(!q4_scratch(n*B)){ memset(out,0,(size_t)B*(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  for(i32 t=0;t<B;t++)
-    q4_quant_act(x+(size_t)t*n,n,q8+(size_t)t*n,q8d+(size_t)t*(n/32),NULL);
+  u8 *q8; f32 *q8d;
+  if(q4_batch_setup(x,n,d,B,out,&q8,&q8d,0)) return;
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)nsb*130;
@@ -922,9 +936,8 @@ void matmul_q4_0s_psy(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
   i32 nb=n/32, nsb=n/256;
   const __m128i mask0F=_mm_set1_epi8(0x0F);
   const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
-  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  q4_quant_act(x,n,q8,q8d,NULL);
+  u8 *q8; f32 *q8d;
+  if(q4_decode_setup(n,d,out,x,&q8,&q8d)) return;
   #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)nsb*132;
@@ -952,9 +965,8 @@ void matmul_q4_0s_psy_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B
   i32 nb=n/32, nsb=n/256;
   const __m128i mask0F=_mm_set1_epi8(0x0F);
   const __m256i onei8=_mm256_set1_epi8(1), ones16=_mm256_set1_epi16(1), eight16=_mm256_set1_epi16(8);
-  if(!q4_scratch(n*B)){ memset(out,0,(size_t)B*(size_t)d*sizeof(f32)); return; }
-  u8 *q8=g_q4act; f32 *q8d=g_q4scl;
-  for(i32 t=0;t<B;t++) q4_quant_act(x+(size_t)t*n,n,q8+(size_t)t*n,q8d+(size_t)t*(n/32),NULL);
+  u8 *q8; f32 *q8d;
+  if(q4_batch_setup(x,n,d,B,out,&q8,&q8d,0)) return;
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)nsb*132;
@@ -1041,10 +1053,9 @@ static f32 q4k_row_dot(const u8 *row, const u8 *act, const f32 *scl, const f32 *
   return acc;
 }
 void matmul_q4_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
-  if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl, *sum16=g_q4sum;
-  for(i32 t=0;t<B;t++)
-    q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),sum16+(size_t)t*(n/16));
+  u8 *qa; f32 *scl;
+  if(q4_batch_setup(x,n,d,B,out,&qa,&scl,1)) return;
+  f32 *sum16=g_q4sum; /* tras el posible realloc (no antes) */
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)(n/256)*144;
@@ -1093,10 +1104,9 @@ static f32 q6k_row_dot(const u8 *row, const u8 *act, const f32 *scl, const f32 *
   return acc;
 }
 void matmul_q6_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
-  if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl, *sum16=g_q4sum;
-  for(i32 t=0;t<B;t++)
-    q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),sum16+(size_t)t*(n/16));
+  u8 *qa; f32 *scl;
+  if(q4_batch_setup(x,n,d,B,out,&qa,&scl,1)) return;
+  f32 *sum16=g_q4sum; /* tras el posible realloc (no antes) */
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)(n/256)*210;
@@ -1137,10 +1147,9 @@ static f32 q5_row_dot(const u8 *row, const u8 *act, const f32 *scl, const f32 *s
   return acc;
 }
 void matmul_q5_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
-  if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl, *sum16=g_q4sum;
-  for(i32 t=0;t<B;t++)
-    q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),sum16+(size_t)t*(n/16));
+  u8 *qa; f32 *scl;
+  if(q4_batch_setup(x,n,d,B,out,&qa,&scl,1)) return;
+  f32 *sum16=g_q4sum; /* tras el posible realloc (no antes) */
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
     const u8 *row=w+(size_t)i*(size_t)(n/32)*22;
@@ -1189,9 +1198,8 @@ static f32 iq1_s_row_dot(const u8 *row, const u8 *act, const f32 *scl, i32 n){
   return acc;
 }
 void matmul_iq1_s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
-  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl;
-  q4_quant_act(x,n,qa,scl,NULL);
+  u8 *qa; f32 *scl;
+  if(q4_decode_setup(n,d,out,x,&qa,&scl)) return;
   i32 nb256=n/256;
   #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
   for(i32 i=0;i<d;i++)
@@ -1200,8 +1208,8 @@ void matmul_iq1_s(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
 void matmul_iq1_s_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
   if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
   if(B==1){ matmul_iq1_s(out,x,w,n,d); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl;
-  for(i32 t=0;t<B;t++) q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),NULL);
+  u8 *qa; f32 *scl;
+  if(q4_batch_setup(x,n,d,B,out,&qa,&scl,0)) return;
   i32 nb256=n/256;
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
@@ -1260,9 +1268,8 @@ static f32 q3k_row_dot(const u8 *row, const u8 *act, const f32 *scl, i32 n){
   return acc;
 }
 void matmul_q3_K(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
-  if(!q4_scratch(n)){ memset(out,0,(size_t)d*sizeof(f32)); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl;
-  q4_quant_act(x,n,qa,scl,NULL);
+  u8 *qa; f32 *scl;
+  if(q4_decode_setup(n,d,out,x,&qa,&scl)) return;
   i32 nb256=n/256;
   #pragma omp parallel for schedule(static) if((i64)n*d > OMP_MM_MIN)
   for(i32 i=0;i<d;i++)
@@ -1271,8 +1278,8 @@ void matmul_q3_K(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
 void matmul_q3_K_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
   if(B<=0 || !q4_scratch(n*B)) { memset(out,0,(size_t)d*B*sizeof(f32)); return; }
   if(B==1){ matmul_q3_K(out,x,w,n,d); return; }
-  u8 *qa=g_q4act; f32 *scl=g_q4scl;
-  for(i32 t=0;t<B;t++) q4_quant_act(x+(size_t)t*n,n,qa+(size_t)t*n,scl+(size_t)t*(n/32),NULL);
+  u8 *qa; f32 *scl;
+  if(q4_batch_setup(x,n,d,B,out,&qa,&scl,0)) return;
   i32 nb256=n/256;
   #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
   for(i32 i=0;i<d;i++){
@@ -1360,37 +1367,59 @@ void matmul_q4_0_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B){
 #endif
 u64 row_stride(u32 type, i32 n){ return (n/ggml_block_size(type))*ggml_type_bytes(type); }
 /* matmul de un rango de filas [r0,r1) — para dual band CPU+GPU del head */
+/* Tabla de dispatch (Fase 6): UN solo sitio para cablear kernels.
+ * Antes había 3 if-chains por tipo (con duplicados y huecos: B2 dejaba `out`
+ * sin escribir para PSY/Q5_0/K-quants en matmul_q_rows).
+ * dec==NULL → decode vía bat(...,1) (Q5_0/K-quants no tienen decode dedicado).
+ * Ausencia en la tabla → fallback genérico dequant+dot (nunca silencio).
+ * (Tipos y lookup declarados en internal/g2b.h para los tests.) */
+static const QMatDispatch qmat_tab[] = {
+  {T_Q4_0, matmul_q4_0, matmul_q4_0_b},
+  {T_Q8_0, matmul_q8_0, matmul_q8_0_b},
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  {T_Q4_0S, matmul_q4_0s, matmul_q4_0s_b},
+  {T_Q4_0S_PSY, matmul_q4_0s_psy, matmul_q4_0s_psy_b},
+  {T_Q4_VVC, matmul_q4_vvc, matmul_q4_vvc_b},
+  {T_IQ1_S, matmul_iq1_s, matmul_iq1_s_b},
+  {T_Q3_K, matmul_q3_K, matmul_q3_K_b},
+  {T_Q5_0, NULL, matmul_q5_0_b},
+  {T_Q4_K, NULL, matmul_q4_K_b},
+  {T_Q6_K, NULL, matmul_q6_K_b},
+#endif
+};
+const QMatDispatch *qmat_lookup(u32 type){
+  for(unsigned i=0;i<sizeof qmat_tab/sizeof qmat_tab[0];i++)
+    if(qmat_tab[i].type==type) return &qmat_tab[i];
+  return NULL;
+}
 void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0, i32 r1){
   if(!out||!x||!w||r1<=r0) return;
-  u64 st=row_stride(type,n);
-  i32 d=r1-r0;
-  if(type==T_Q4_0){ matmul_q4_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
-  if(type==T_Q8_0){ matmul_q8_0(out+r0,x,w+(size_t)r0*st,n,d); return; }
-#if defined(__AVX2__) && !defined(DISABLE_AVX2)
-  if(type==T_Q4_0S){ matmul_q4_0s(out+r0,x,w+(size_t)r0*st,n,d); return; }
-  if(type==T_Q4_VVC){ matmul_q4_vvc(out+r0,x,w+(size_t)r0*st,n,d); return; }
-#endif
+  const QMatDispatch *e=qmat_lookup(type);
+  if(e){
+    u64 st=row_stride(type,n);
+    i32 d=r1-r0;
+    if(e->dec) e->dec(out+r0,x,w+(size_t)r0*st,n,d);
+    else e->bat(out+r0,x,w+(size_t)r0*st,n,d,1); /* sin decode: bat con B=1 */
+    return;
+  }
+  /* B2 (fix Fase 6): antes los tipos sin kernel caían en silencio sin escribir
+   * out. Ahora fallback dequant+dot genérico sobre el rango. */
+  { u64 st=row_stride(type,n);
+    f32 *tmp=fallback_buf((size_t)n);
+    if(!tmp){ for(i32 i=r0;i<r1;i++) out[i]=0.f; return; }
+    for(i32 i=r0;i<r1;i++){
+      gguf_dequant(type,w+(size_t)i*st,tmp,(u64)n);
+      f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
+      out[i]=s;
+    } }
 }
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(!out || !x || !w || n<=0 || d<=0 || B<=0){
     if(out && d>0 && B>0) memset(out, 0, (size_t)d*B*sizeof(f32));
     return;
   }
-  if(type==T_Q4_0){ matmul_q4_0_b(out,x,w,n,d,B); return; }
-#if defined(__AVX2__) && !defined(DISABLE_AVX2)
-  if(type==T_IQ1_S){ matmul_iq1_s_b(out,x,w,n,d,B); return; }
-  if(type==T_Q3_K){ matmul_q3_K_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_0S){ matmul_q4_0s_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_VVC){ matmul_q4_vvc_b(out,x,w,n,d,B); return; }
-#endif
-  if(type==T_Q8_0){ matmul_q8_0_b(out,x,w,n,d,B); return; }
-#if defined(__AVX2__) && !defined(DISABLE_AVX2)
-  if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,B); return; }
-  if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_0S){ matmul_q4_0s_b(out,x,w,n,d,B); return; }
-  if(type==T_Q4_0S_PSY){ matmul_q4_0s_psy_b(out,x,w,n,d,B); return; }
-#endif
+  { const QMatDispatch *e=qmat_lookup(type);
+    if(e){ e->bat(out,x,w,n,d,B); return; } }
   if(type==T_F32){
     #pragma omp parallel for schedule(static) if((i64)n*d*B > OMP_MM_MIN)
     for(i32 i=0;i<d;i++){
@@ -1430,20 +1459,12 @@ void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row){
     if(out && d>0) memset(out, 0, (size_t)d * sizeof(f32));
     return;
   }
-  if(type==T_Q4_0){ matmul_q4_0(out,x,w,n,d); return; }
-#if defined(__AVX2__) && !defined(DISABLE_AVX2)
-  if(type==T_IQ1_S){ matmul_iq1_s(out,x,w,n,d); return; }
-  if(type==T_Q3_K){ matmul_q3_K(out,x,w,n,d); return; }
-  if(type==T_Q4_0S){ matmul_q4_0s(out,x,w,n,d); return; }
-  if(type==T_Q4_0S_PSY){ matmul_q4_0s_psy(out,x,w,n,d); return; }
-  if(type==T_Q4_VVC){ matmul_q4_vvc(out,x,w,n,d); return; }
-#endif
-  if(type==T_Q8_0){ matmul_q8_0(out,x,w,n,d); return; }
-#if defined(__AVX2__) && !defined(DISABLE_AVX2)
-  if(type==T_Q5_0){ matmul_q5_0_b(out,x,w,n,d,1); return; }
-  if(type==T_Q4_K){ matmul_q4_K_b(out,x,w,n,d,1); return; }
-  if(type==T_Q6_K){ matmul_q6_K_b(out,x,w,n,d,1); return; }
-#endif
+  { const QMatDispatch *e=qmat_lookup(type);
+    if(e){
+      if(e->dec) e->dec(out,x,w,n,d);
+      else e->bat(out,x,w,n,d,1); /* sin decode dedicado: bat con B=1 */
+      return;
+    } }
   if(type==T_F32){ matmul(out,x,(f32*)w,n,d); return; }
   /* Fallback para tipos no fusionados (Q4_1, etc.): per-thread alloc, no per-row */
   u64 rs=row_stride(type,n);
