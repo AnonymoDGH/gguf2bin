@@ -1,5 +1,5 @@
 /* valida matmul_q4_0 / matmul_q8_0 vs dequant+dot naive */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

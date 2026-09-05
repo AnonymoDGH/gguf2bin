@@ -1,5 +1,5 @@
 /* L5 — load G2BX + forward (Llama/Qwen2/Qwen3) — FIXED v3.3 */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -339,6 +339,24 @@ u64 model_est_ram(Model *m){
   if(!m || m->c.n_layers<=0) return 0;
   i32 ctx=m->ctx>0?m->ctx:m->c.seq_len;
   return est_for(m, ctx, kv_is_q8(m));
+}
+/* Estimación de RAM a partir de solo la cfg (g2b_info: header escaneado, sin
+ * cargar el modelo). Misma fórmula que est_for; mantener ambas sincronizadas. */
+u64 model_est_ram_cfg(const ModelCfg *c, int fa_interval, int kv_q8, int ctx,
+                      int pf_B, u64 tok_bytes){
+  if(!c || c->n_layers<=0) return 0;
+  i32 nkv=c->n_kv_heads*c->head_dim;
+  i32 nl = fa_interval>0 ? (c->n_layers+fa_interval-1)/fa_interval : c->n_layers;
+  size_t qr=((size_t)nkv+31u)/32u*34u;
+  u64 kv = kv_q8 ? 2u*(u64)nl*(u64)ctx*qr
+                 : 2u*(u64)nl*(u64)ctx*(u64)nkv*4u;
+  i32 dim=c->dim, hid=c->hidden_dim;
+  i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
+  u64 nbuf=(u64)dim*3u+(u64)hid*2u+(u64)c->n_heads*c->head_dim+(u64)nkv*2u+(u64)c->n_heads*(u64)ctx+(u64)maxn;
+  u64 buf=nbuf*4u;
+  if(pf_B>0)
+    buf += (u64)pf_B*(u64)(dim+dim+hid*2+c->n_heads*c->head_dim+nkv*2+c->n_heads*ctx)*4u;
+  return kv+buf+tok_bytes;
 }
 /* Tamaño de la KV cache (K+V) para un modo dado. */
 u64 model_kv_bytes(Model *m, int q8){

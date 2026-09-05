@@ -7,7 +7,7 @@
  *     Valida que la aproximación Q8 es sana (con ref≈0 por cancelación la
  *     métrica relativa explota por ruido legítimo: B es holgada, manda A).
  * Uso: iq1check [n] [d] [B]  (n múltiplo de 256) */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

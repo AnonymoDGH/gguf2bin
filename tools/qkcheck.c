@@ -1,7 +1,7 @@
 /* qkcheck.c — valida los kernels fusionados Q4_K/Q6_K contra una referencia
    independiente (semántica ggml) con múltiples filas/seeds y escalas variadas,
    incluyendo dmin grandes (clase de bug: corrección m·Σx mal escalada). */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

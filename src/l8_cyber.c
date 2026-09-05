@@ -1,4 +1,4 @@
-﻿#include "g2b.h"
+﻿#include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

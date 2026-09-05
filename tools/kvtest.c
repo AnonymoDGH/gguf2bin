@@ -1,5 +1,5 @@
 ﻿/* kvtest.c â€” compara logits con KV cache F32 vs Q8_0 (misma arquitectura/pesos). */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

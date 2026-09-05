@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 /* L6 — tokenizer BPE byte-level (Qwen2/3 GPT-2) */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

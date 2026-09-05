@@ -1,5 +1,5 @@
 /* L4 — GGUF → G2BX (formato propio denso, indexado por rol) — v4.7 */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>

@@ -1,5 +1,5 @@
 /* qkdbg.c — diagnostico por grupo: kernel vs referencia */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

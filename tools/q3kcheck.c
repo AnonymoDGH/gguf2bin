@@ -5,7 +5,7 @@
  * Uso: q3kcheck [n] [d] [B]  (n múltiplo de 256)
  *      q3kcheck onehot  (barrido one-hot por las 256 posiciones: localiza
  *      el grupo/elemento divergente al ulp) */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

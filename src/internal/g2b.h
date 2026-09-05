@@ -112,6 +112,7 @@ void g2bx_set_q4s(int v);
 void g2bx_set_q4s_psy(int v);
 void g2bx_set_q4vvc(int v);
 int vk_init(void); void vkinfo_cmd(void); int vk_device_ok(void);
+const char *vk_device_name(void); u64 vk_vram(void);
 int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(void); void vk_head_run(const f32 *x, f32 *logits); int vk_head_ready(void);
 int g2bx_info(const char *path);
 
@@ -193,7 +194,9 @@ typedef struct {
 } Model;
 
 int model_load_g2bx(const char *path, Model *m);
-/* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
+/* Estimación de RAM sin Model (g2b_info): misma fórmula que model_est_ram. */
+u64 model_est_ram_cfg(const ModelCfg *c, int fa_interval, int kv_q8, int ctx,
+                      int pf_B, u64 tok_bytes);/* ── Dual band CPU+GPU: worker Vulkan en proceso hijo (a prueba de drivers rotos) ── */
 int  vk_worker_main(int argc, char **argv);          /* modo --gpu-worker (proceso hijo) */
 int  vk_dual_start(Model *m, const char *model_path); /* arranca worker (--gpu) */
 void vk_dual_stop(void);

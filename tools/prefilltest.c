@@ -1,6 +1,6 @@
 ﻿/* prefilltest.c â€” verifica que model_prefill (batcheado) produce los mismos
    logits que el forward secuencial token a token. */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

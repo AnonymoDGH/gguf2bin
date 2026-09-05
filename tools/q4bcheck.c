@@ -2,7 +2,7 @@
  * Uso: q4bcheck [n] [d] [B] â€” prueba nb par/impar y colas de B (G<4).
  * Criterio: bit-idÃ©ntico (mismo orden de fmadds por salida) salvo re-asociaciÃ³n
  * de la combinaciÃ³n de cadenas (tolerancia 1e-4 relativa). */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

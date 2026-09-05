@@ -1,5 +1,5 @@
 /* L2 — dequant + matmul fused Q4_0/Q8_0 — FIXED con AVX2 Q4_0 */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

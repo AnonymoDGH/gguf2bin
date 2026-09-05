@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 /* L1 — parser GGUF mínimo (entrada cruda) — con bounds checking */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)

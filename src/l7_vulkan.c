@@ -14,7 +14,7 @@ static HMODULE g_dll;
 #include <dlfcn.h>
 static void *g_dll;
 #endif
-#include "g2b.h"
+#include "internal/g2b.h"
 #include "../shaders/shaders_emb.h"
 
 static void vk_log(const char *fmt, ...){

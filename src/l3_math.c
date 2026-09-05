@@ -1,5 +1,5 @@
 /* L3 — math + rope + rmsnorm + softmax + silu */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <math.h>
 #if defined(__AVX2__)
 #include <immintrin.h>

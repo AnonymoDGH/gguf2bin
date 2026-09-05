@@ -1,7 +1,7 @@
 ﻿/* q4check.c â€” valida matmul_q4_0 AVX2 contra referencia dequant+dot (float exacto).
    Tolerancia 2%: la ruta AVX2 cuantiza la activaciÃ³n a Q8_0 (error ~1%),
    pero cualquier bug de Ã­ndice/nibble/escala produce error O(1). */
-#include "g2b.h"
+#include "internal/g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
