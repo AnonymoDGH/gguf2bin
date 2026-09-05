@@ -282,11 +282,12 @@ static int cmd_bench(int argc, char **argv){
   i32 n=32;
   float bvh_ratio=0.f;
   OptsCommon co; opts_common_init(&co);
-  i32 prefill_n=0;
+  i32 prefill_n=0; int json=0;
   for(int i=3;i<argc;i++){
     if(opts_common_try(&co,argc,argv,&i)) continue;
     if((!strcmp(argv[i],"-n")||!strcmp(argv[i],"--n"))&&i+1<argc) n=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--prefill")&&i+1<argc) prefill_n=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"--json")) json=1;
   }
   g2b_config cfg;
   fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,NULL,0);
@@ -298,7 +299,11 @@ static int cmd_bench(int argc, char **argv){
   if(g2b_model_info_of(s,&fi)!=G2B_OK){ g2b_close(s); return 1; }
   float dec=0, pre=0;
   if(g2b_bench(s,n,prefill_n,&dec,&pre)!=G2B_OK){ g2b_close(s); return 1; }
-  if(prefill_n>0){
+  if(json)
+    printf("{\"model\":\"%s\",\"decode_tps\":%.1f,\"prefill_tps\":%.1f,"
+           "\"dim\":%d,\"layers\":%d,\"ctx\":%d}\n",
+      argv[2],dec,pre,fi.dim,fi.n_layers,fi.ctx_eff);
+  else if(prefill_n>0){
     int pn=prefill_n, mc=fi.ctx_eff>0?fi.ctx_eff:fi.ctx_max;
     if(pn>mc-4) pn=mc-4;
     fprintf(stderr,"bench-prefill: %d tokens in %.3fs -> %.1f tok/s (min of 3) (dim=%d L=%d ctx=%d)\n",

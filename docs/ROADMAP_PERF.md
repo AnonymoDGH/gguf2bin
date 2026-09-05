@@ -75,3 +75,29 @@ Plan para el usuario (fuera del codigo):
 4. Cross-check independiente: binario llama.cpp-Vulkan oficial — si tambien
    falla, es 100% sistema/driver.
 Mientras tanto el runtime CPU (15.9 tok/s q4s) no depende de nada de esto.
+
+## Fase 5 (2026-09-05): R1/R3/R4 medidos con A/B intercalado — veredicto
+Maquina: el mismo i5-6200U (2C/4T). Qwen3-0.6B Q4: ~340 MB/token;
+22-25 tok/s = 7.5-8.5 GB/s ~ TECHO del bus single-channel. Conclusión:
+el decode está limitado por BYTES, no por ALU. Todo lo que añada tráfico
+(por pequeño que sea) pierde; lo que ahorre ALU es invisible.
+- **R1 (pre-conversión de escalas fp16, VLA por fila): −8 % consistente**
+  (3 pares A/B: 22.0>21.3, 23.2>20.1, 24.6>22.6). Causa: el array scv añade
+  8 B de tráfico (write+read) por bloque contra 2 B que ahorra. Con `_cvtsh_ss`
+  por hardware la conversión ya era ~gratis. REVERTIDO. Lección: con F16C no
+  repetir este experimento; sin F16C (build escalar) podría ganar.
+- **R4 (norms en F32 en carga): neutro** (24.8 vs 24.4, dentro del ruido ±3 %).
+  El dequant de norms es ~0.04 % del FLOP/token por construcción. REVERTIDO
+  (árbol esbelto > micro-opt no demostrable).
+- **R3 (caché cos/sin por posición): neutro** (decode +1.0/−0.5/−1.3,
+  prefill +0.3/−0.8). El trig es ~0.5 % del token. REVERTIDO por el mismo
+  estándar. La factorización tabla/aplicación queda como idea si algún día
+  el prefill largo domina.
+- **Threads**: sweep 1/2/3/4/5/6/8 → 13.7/19.6/19.7/23.3/19.3/21.9/21.9.
+  4 hilos (default OpenMP) es el óptimo; más hilos solo añaden contienda.
+  `OMP_PROC_BIND` ±2 % (no concluyente, sin cambio).
+- **Conservado**: `--json` en bench (infra de medición para CI histórico).
+- **Lo único que puede mover decode aquí**: menos bytes/token (R6 atención
+  por bloques en ctx>1k, R10 especulativo) o menos pesos/token (--mv/--prune,
+  ya existen con su tradeoff). R6 exige antes un harness de bench en ctx
+  largo (el bench actual cicla pos<32) + validación de calidad.
