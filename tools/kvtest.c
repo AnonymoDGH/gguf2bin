@@ -1,11 +1,11 @@
-/* kvtest.c — compara logits con KV cache F32 vs Q8_0 (misma arquitectura/pesos). */
+﻿/* kvtest.c â€” compara logits con KV cache F32 vs Q8_0 (misma arquitectura/pesos). */
 #include "g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 
 int main(int argc, char **argv){
-  if(argc<2){ fprintf(stderr,"uso: kvtest <model.g2bx> [steps]\n"); return 1; }
+  if(argc<2){ fprintf(stderr,"usage: kvtest <model.g2bx> [steps]\n"); return 1; }
   const char *path=argv[1];
   int steps = argc>2 ? atoi(argv[2]) : 32;
   if(steps<1) steps=1;
@@ -13,13 +13,13 @@ int main(int argc, char **argv){
 
   Model a, b;
   if(model_load_g2bx(path,&a)){ fprintf(stderr,"no cargo %s\n",path); return 1; }
-  if(!a.ix_global[R_TOK_EMBD]){ fprintf(stderr,"modelo sin token_embd (draft); kvtest no aplica\n"); model_free(&a); return 2; }
+  if(!a.ix_global[R_TOK_EMBD]){ fprintf(stderr,"model without token_embd (draft); kvtest not applicable\n"); model_free(&a); return 2; }
   if(model_load_g2bx(path,&b)){ model_free(&a); return 1; }
   b.flags |= F_KV_Q8;
 
   if(ctx > a.c.seq_len) ctx = a.c.seq_len;
-  if(model_set_ctx(&a,ctx)){ fprintf(stderr,"set_ctx A fallo\n"); return 1; }
-  if(model_set_ctx(&b,ctx)){ fprintf(stderr,"set_ctx B fallo\n"); return 1; }
+  if(model_set_ctx(&a,ctx)){ fprintf(stderr,"set_ctx A failed\n"); return 1; }
+  if(model_set_ctx(&b,ctx)){ fprintf(stderr,"set_ctx B failed\n"); return 1; }
 
   f32 *la=malloc((size_t)a.c.vocab*sizeof(f32));
   f32 *lb=malloc((size_t)a.c.vocab*sizeof(f32));

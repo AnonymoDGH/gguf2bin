@@ -298,7 +298,7 @@ int model_enable_swap(Model *m, const char *path){
   if(m->ctx>0) {
     if(model_set_ctx(m,m->ctx)){ free(m->swap_path); m->swap_path=NULL; return -1; }
   }
-  fprintf(stderr,"swap: KV cache respaldada en %s\n", path);
+  fprintf(stderr,"swap: KV cache backed by %s\n", path);
   return 0;
 }
 
@@ -357,7 +357,7 @@ void model_ram_report(Model *m){
     (unsigned long long)(rt>>20), kv_is_q8(m)?"Q8_0":"F32", m->ctx,
     m->use_swap?" (file-backed)":"");
   if(kv > ((u64)1<<30) && !kv_is_q8(m))
-    fprintf(stderr,"ram: aviso — KV en F32 usa ~%llu MB; pruebe --q8-kv o --swap D:\\kv.swap\n",
+    fprintf(stderr,"ram: warning: F32 KV uses ~%llu MB; try --q8-kv or --swap <path>\n",
       (unsigned long long)(kv>>20));
 }
 
@@ -369,7 +369,7 @@ int model_auto_budget(Model *m, u64 max_ram){
   if(!q8 && est_for(m,ctx,0)>max_ram){ q8=1; m->flags|=F_KV_Q8; }
   while(ctx>256 && est_for(m,ctx,q8)>max_ram) ctx/=2;
   if(est_for(m,ctx,q8)>max_ram)
-    fprintf(stderr,"model: aviso — ni con KV Q8 y ctx=%d cabe en %llu MB (usa %llu MB)\n",
+    fprintf(stderr,"model: warning: even with Q8 KV and ctx=%d it does not fit in %llu MB (uses %llu MB)\n",
       ctx,(unsigned long long)(max_ram>>20),(unsigned long long)(est_for(m,ctx,q8)>>20));
   return model_set_ctx(m,ctx);
 }
@@ -452,19 +452,19 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   char magic[4]; u16 ver;
   if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)
      ||fread(&ver,2,1,f)!=1||fread(&m->arch,1,1,f)!=1||fread(&m->flags,1,1,f)!=1){
-    fprintf(stderr,"model: no es G2BX\n"); return -1;
+    fprintf(stderr,"model: not G2BX\n"); return -1;
   }
-  if(ver==0||ver>G2BX_VER_MAX){ fprintf(stderr,"model: versión G2BX %u no soportada\n",ver); return -1; }
+  if(ver==0||ver>G2BX_VER_MAX){ fprintf(stderr,"model: unsupported G2BX version %u\n",ver); return -1; }
   if(ver>=2){ if(fread(&m->c,sizeof m->c,1,f)!=1) return -1; }
   else { /* v1: cfg de 40 bytes, sin campos ssm */
     memset(&m->c,0,sizeof m->c);
     if(fread(&m->c,G2BX_CFG_V1,1,f)!=1) return -1;
   }
   if(fread(&m->n_slots,4,1,f)!=1){
-    fprintf(stderr,"model: no es G2BX\n"); return -1;
+    fprintf(stderr,"model: not G2BX\n"); return -1;
   }
   if(m->n_slots==0 || m->n_slots>(1u<<20)){
-    fprintf(stderr,"model: n_slots=%u inválido\n",m->n_slots); return -1;
+    fprintf(stderr,"model: n_slots=%u invalid\n",m->n_slots); return -1;
   }
   m->slots=malloc(m->n_slots*sizeof(Slot));
   if(!m->slots || fread(m->slots,sizeof(Slot),m->n_slots,f)!=m->n_slots) return -1;
@@ -551,7 +551,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
     m->data=malloc(m->data_size);
     m->own_data=1;
     if(!m->data || fread(m->data,1,m->data_size,f)!=m->data_size){
-      fprintf(stderr,"model: truncado\n"); return -1;
+      fprintf(stderr,"model: truncated\n"); return -1;
     }
   }
 
@@ -560,26 +560,26 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   /* validación de geometría: sin esto, GQA y KV Q8 leen fuera de rango en silencio */
   if(m->c.n_heads<=0 || m->c.dim<=0 || m->c.vocab<=0 || m->c.n_layers<=0
      || m->c.n_layers>1024 || m->c.hidden_dim<=0){
-    fprintf(stderr,"model: geometría inválida (heads=%d dim=%d vocab=%d L=%d hid=%d)\n",
+    fprintf(stderr,"model: invalid geometry (heads=%d dim=%d vocab=%d L=%d hid=%d)\n",
       m->c.n_heads,m->c.dim,m->c.vocab,m->c.n_layers,m->c.hidden_dim);
     return -1;
   }
   if(m->c.n_kv_heads<=0) m->c.n_kv_heads=m->c.n_heads;
   if(m->c.n_kv_heads<=0 || m->c.n_heads % m->c.n_kv_heads){
-    fprintf(stderr,"model: n_heads=%d no divisible por n_kv_heads=%d — GQA inválida\n",
+    fprintf(stderr,"model: n_heads=%d not divisible by n_kv_heads=%d - invalid GQA\n",
       m->c.n_heads,m->c.n_kv_heads);
     return -1;
   }
   if(m->c.head_dim<=0) m->c.head_dim=m->c.dim/m->c.n_heads;
-  if(m->c.head_dim<=0){ fprintf(stderr,"model: head_dim inválido\n"); return -1; }
+  if(m->c.head_dim<=0){ fprintf(stderr,"model: invalid head_dim\n"); return -1; }
   if(m->c.head_dim % 32){
     m->no_kv_q8=1; /* el slice por head no cae en bloque Q8 */
-    fprintf(stderr,"model: head_dim=%d no múltiplo de 32 — KV cache forzada a F32\n",m->c.head_dim);
+    fprintf(stderr,"model: head_dim=%d not a multiple of 32 - forcing F32 KV cache\n",m->c.head_dim);
   }
 
   build_index(m);
   if(model_set_ctx(m, m->c.seq_len)){
-    fprintf(stderr,"model: OOM en buffers de runtime\n"); return -1;
+    fprintf(stderr,"model: OOM in runtime buffers\n"); return -1;
   }
   m->tok=NULL;
   Tokenizer *tk=malloc(sizeof(Tokenizer));
@@ -595,7 +595,7 @@ int model_load_g2bx(const char *path, Model *m){
   m->swap_fd = -1;
 #endif
   FILE *f=fopen(path,"rb");
-  if(!f){ fprintf(stderr,"model: no abro %s\n",path); return -1; }
+  if(!f){ fprintf(stderr,"model: cannot open %s\n",path); return -1; }
   int rc=load_header_body(f,m,path);
   fclose(f);
   if(rc){ model_free(m); return -1; }
@@ -660,8 +660,8 @@ static void apply_rope(Model *m, f32 *x, i32 len, i32 pos, i32 head_dim, f32 the
 
 static int require_slot(Slot *s, const char *what, i32 layer){
   if(s) return 0;
-  if(layer>=0) fprintf(stderr,"fwd: falta slot %s L%d\n", what, layer);
-  else fprintf(stderr,"fwd: falta slot %s\n", what);
+  if(layer>=0) fprintf(stderr,"fwd: missing slot %s L%d\n", what, layer);
+  else fprintf(stderr,"fwd: missing slot %s\n", what);
   return -1;
 }
 
@@ -939,7 +939,7 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
   const i32 dconv=c->ssm_d_conv;
   if(ctx<=0) ctx=c->seq_len;
   if(pos<0||pos>=ctx||token<0||token>=c->vocab) return -1;
-  if(!m->buf||!m->ssm_st||!m->conv_state){ fprintf(stderr,"fwd: runtime no inicializado\n"); return -1; }
+  if(!m->buf||!m->ssm_st||!m->conv_state){ fprintf(stderr,"fwd: runtime not initialized\n"); return -1; }
   int _dbg_hyb = getenv("G2BX_DBG")!=NULL;
   if(_dbg_hyb && pos<2) fprintf(stderr,"[C] forward_hybrid token %d pos %d dim %d\n", token, pos, dim);
 
@@ -1196,18 +1196,18 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
 
   if(pos < 0 || pos >= ctx){
     static int warned;
-    if(!warned){ fprintf(stderr,"fwd: pos=%d fuera de [0,%d); abort forward\n", pos, ctx); warned=1; }
+    if(!warned){ fprintf(stderr,"fwd: pos=%d out of [0,%d); aborting forward\n", pos, ctx); warned=1; }
     if(logits) memset(logits, 0, (size_t)c->vocab * sizeof(f32));
     return;
   }
   if(token < 0 || token >= c->vocab){
     static int warned;
-    if(!warned){ fprintf(stderr,"fwd: token=%d fuera de vocab %d\n", token, c->vocab); warned=1; }
+    if(!warned){ fprintf(stderr,"fwd: token=%d out of vocab %d\n", token, c->vocab); warned=1; }
     if(logits) memset(logits, 0, (size_t)c->vocab * sizeof(f32));
     return;
   }
   if(!m->buf || (!m->kcache && !m->kcq)){
-    fprintf(stderr,"fwd: runtime no inicializado\n"); return;
+    fprintf(stderr,"fwd: runtime not initialized\n"); return;
   }
 
   f32 *x=m->buf, *xb=x+dim, *xb2=xb+dim, *hb=xb2+dim, *hb2=hb+hid;
@@ -1391,7 +1391,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
   i32 nq=c->n_heads*hd, nkv=c->n_kv_heads*hd, ctx=m->ctx;
   i32 group=c->n_heads/c->n_kv_heads; if(group<1) group=1;
   if(pos0<0 || pos0+n>ctx){
-    fprintf(stderr,"prefill: rango [%d,%d) fuera de ctx=%d\n",pos0,pos0+n,ctx);
+    fprintf(stderr,"prefill: range [%d,%d) outside ctx=%d\n",pos0,pos0+n,ctx);
     return -1;
   }
   Slot *emb=slot_get(m,R_TOK_EMBD,-1);
@@ -1406,7 +1406,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
     f32 *row=m->buf+dim*3+hid*2+nq+nkv*2+c->n_heads*ctx; /* zona 'row' de buf */
 
     for(i32 t=0;t<B;t++){
-      if(toks[t]<0 || toks[t]>=c->vocab){ fprintf(stderr,"prefill: token %d fuera de vocab\n",toks[t]); return -1; }
+      if(toks[t]<0 || toks[t]>=c->vocab){ fprintf(stderr,"prefill: token %d out of vocab\n",toks[t]); return -1; }
       u8 *ep=slot_ptr(m,emb)+(size_t)toks[t]*row_stride(emb->type,dim);
       gguf_dequant(emb->type,ep,x+(size_t)t*dim,(u64)dim);
     }
@@ -1595,7 +1595,7 @@ int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop){
   fprintf(stderr,"\n");
   for(int k=0;k<ndrop && k<nl;k++){
     m->skip_layer[bis[k].L]=1;
-    fprintf(stderr,"drop: omitiendo bloque %d (BI=%.4f)\n",bis[k].L,(double)bis[k].bi);
+    fprintf(stderr,"drop: skipping block %d (BI=%.4f)\n",bis[k].L,(double)bis[k].bi);
   }
   free(bis);
   free(m->bi_pre); free(m->bi_dot); free(m->bi_n2); free(m->bi_n2p);

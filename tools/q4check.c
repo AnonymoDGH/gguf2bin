@@ -1,6 +1,6 @@
-/* q4check.c — valida matmul_q4_0 AVX2 contra referencia dequant+dot (float exacto).
-   Tolerancia 2%: la ruta AVX2 cuantiza la activación a Q8_0 (error ~1%),
-   pero cualquier bug de índice/nibble/escala produce error O(1). */
+﻿/* q4check.c â€” valida matmul_q4_0 AVX2 contra referencia dequant+dot (float exacto).
+   Tolerancia 2%: la ruta AVX2 cuantiza la activaciÃ³n a Q8_0 (error ~1%),
+   pero cualquier bug de Ã­ndice/nibble/escala produce error O(1). */
 #include "g2b.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +11,7 @@ int main(int argc, char **argv){
   int n = argc>1? atoi(argv[1]) : 1024;
   int d = argc>2? atoi(argv[2]) : 4096;
   int seed = argc>3? atoi(argv[3]) : 1;
-  if(n<=0 || n%32){ printf("n debe ser multiplo de 32\n"); return 1; }
+  if(n<=0 || n%32){ printf("n must be a multiple of 32\n"); return 1; }
   size_t nb = (size_t)n/32;
   size_t wbytes = nb*18*(size_t)d;
   u8 *w = malloc(wbytes);
@@ -31,9 +31,9 @@ int main(int argc, char **argv){
       for(int j=0;j<16;j++) *p++=(u8)((b*131+7+j*37)&0xff);
     }
   }
-  /* referencia: replica el algoritmo del kernel en escalar — activación cuantizada
-     a Q8_0 (igual que matmul_q4_0) + dot entero por bloque. Comparación exacta
-     salvo reasociación de float. */
+  /* referencia: replica el algoritmo del kernel en escalar â€” activaciÃ³n cuantizada
+     a Q8_0 (igual que matmul_q4_0) + dot entero por bloque. ComparaciÃ³n exacta
+     salvo reasociaciÃ³n de float. */
   i8 *q8 = malloc((size_t)n);
   f32 *d32 = malloc((size_t)nb*sizeof(f32));
   if(!q8||!d32){ printf("OOM\n"); return 1; }

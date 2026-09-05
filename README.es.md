@@ -19,12 +19,13 @@ Decode sostenido con `--fast` (prioridad alta + OpenMP + KV cuantizada).
 | Modelo | Pesos (mmap) | RAM runtime | decode | prefill |
 |---|---|---|---|---|
 | **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** | 7.8 |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **38.1** (`--mv 0.5`) / **39.2** (`--mv 1.0`) | **47.9** |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **40.1** (`--mv 0.5`) / 39.2 (`--mv 1.0`) | **47.9** |
 | **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
 | Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
+| Llama-3.2-1B Q4_0S_PSY | 737 MB | 644 MB | 14.7 / **30.6** (`--mv 0.5`) | — |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-Medido 2026-08-30/31 en i5-6200U con `bench -n 32` (mín3). `--mv 0.5` salta ~50% FFN/SSM vía Swapeculative MV (hash + predictor 2-bit) → 25→38 tok/s (+52%) con pérdida de calidad, `--mv 1.0` → 39.2 tok/s. A ~25 tok/s el bus DDR3L ~9 GB/s está saturado; prefill toca techo cómputo ~27 GMAC/s.
+Medido 2026-08-31 en i5-6200U con `bench -n 32` (mín3). `--mv 0.5` Swapeculative + fallback TLS buf → Qwen3 25.0→40.1 tok/s (**+60%**), Llama Q4_0S_PSY 14.7→30.6 (**+108%**). `--psy` (2 escalas/256, 132B) da mejor ppl que Q4_0S a igual velocidad. A ~25 tok/s el decode va clavado a la DDR3L ~9 GB/s; el prefill toca techo de cómputo ~27 GMAC/s.
 
 ## 🚀 Inicio rápido
 
@@ -141,6 +142,17 @@ docs/RESEARCH.md   notas de investigación y roadmap de rendimiento
 
 <details>
 <summary><b>📜 Historial de cambios</b></summary>
+
+#### v4.9 — IQ1_S + Q3_K fusionados (27B desatascado)
+- **Dot entero IQ1_S** (`madd`+SAD, act Q8, 1 hsum/escala por 32): los 264 slots IQ1_S (~3.4 GB) iban por fallback escalar; el prototipo fusionado existía pero nunca se despachaba. Conectado en `matmul_q`/`matmul_q_b`, validado con nuevo `tools/iq1check` (vs matemática exacta-Q8: maxrel 5e-4).
+- **Dot entero Q3_K** (valores −4..3, escalas por 16, bias −32): cubre el head de 248k (521 MB) + modelos Q3_K densos. Validado con nuevo `tools/q3kcheck` incl. barrido one-hot de 256 posiciones (cazó pre-ship un bug de medio vector `cvtepi8`: los 8 altos se perdían en silencio).
+- Híbrido 27B (Qwen3.8, siempre decode secuencial): stock 132.7 s → **79.6 s (−40 %, 1.67×)** para prompt+2 tokens, page cache caliente, i5-6200U. El greedy difiere en argmax (aprox Q8 sobre pesos de 1.5-bit — ambas salidas son mojibake de IQ1_S); la matemática, acotada por los harnesses.
+
+#### v4.8 — Prefill bloqueado (blocking G=4 por tokens)
+- **Tráfico de pesos ÷4 en `matmul_q4_0_b` / `matmul_q4_0s_b`**: cada fila de pesos se desempaqueta una vez y se reusa para 4 tokens (antes: re-leída por token, 16× por batch). Prefill Qwen3-0.6B Q4_0 38.9 → **53.7 tok/s (+38 %)** y Qwen2.5-3B Q4_0 7.0 → **9.6 tok/s (+37 %)** (A/B intercalado en i5-6200U). Bit-exacto (`prefilltest` diff 0 incl. 3B GQA, `q4bcheck` 5/5, ppl idéntica 58.709). Decode intacto (3B: 5.4 = 5.4); salida del híbrido 27B IQ1_S byte-idéntica a stock.
+
+#### v4.7 — Q4_0S_PSY (psicoacústico) + fallback TLS
+- **Q4_0S_PSY**: 2 escalas fp16 por 256 (132B vs 130B) — baja 128 + alta 128, como MP3. `pack --psy` → +6% speed y mejor ppl que Q4_0S. Llama-3.2-1B 14.7 tok/s (PSY) → 30.6 con `--mv 0.5` (+108%). Fallback IQ ahora TLS buf → qwen38 no hace malloc por fila.
 
 #### v4.6 — Swapeculative MV Triple Band
 - **--mv 0.0..1.0**: skip tunable de FFN (denso) / delta SSM (híbrido) vía hash + predictor 2-bit. `25.0 → 38.1 tok/s (+52%)` en Qwen3-0.6B Q4_0 con `--mv 0.5`, `39.2` con `--mv 1.0` en i5-6200U. Tradeoff calidad como esperado — usa 0.3-0.5 para velocidad, 0 para calidad. Funciona en todas las archs.

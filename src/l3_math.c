@@ -147,7 +147,7 @@ void silu_mul(f32 *gate, const f32 *up, i32 n){
 /* LLaMA style RoPE: rotate adjacent pairs (0,1), (2,3)... — frecuencias precomputadas sin powf en loop */
 void rope_th_llama(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
   i32 half=head_dim/2;
-  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (no soportado)\n",head_dim); return; }
+  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (unsupported)\n",head_dim); return; }
   f32 cs[1024];
   f32 inv_step = powf(theta, -2.0f/(f32)head_dim);
   f32 freq = 1.0f;
@@ -166,7 +166,7 @@ void rope_th_llama(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
 /* NEOX style RoPE: rotate half-split pairs (0, D/2), (1, D/2+1)... */
 void rope_th_neox(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
   i32 half = head_dim/2;
-  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (no soportado)\n",head_dim); return; }
+  if(half>512){ fprintf(stderr,"rope: head_dim %d > 1024 (unsupported)\n",head_dim); return; }
   f32 cs[1024];
   f32 inv_step = powf(theta, -2.0f/(f32)head_dim);
   f32 freq = 1.0f;

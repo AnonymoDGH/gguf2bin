@@ -2,6 +2,8 @@
 gguf2bin2
 gguf2bin2.exe
 gguf2bin2_*.exe
+tiny.exe
+tiny
 *.o
 src/*.o
 tiny_test.g2bx
@@ -16,6 +18,9 @@ kvtest.exe
 *.gguf
 *.g2bx
 !tiny.g2bx
+*.lora
+*.safetensors
+*.jsonl
 
 # IDE / OS
 .vs/
@@ -47,3 +52,11 @@ _hybrid_*.c
 _trace.gdb
 gguf2bin_benchmark.png
 gguf2bin_benchmark.svg
+HRM.safetensors
+HRM_config.json
+hrm-tiny.g2bx
+prompt.txt
+general.txt
+datasets/
+swebench_mini/
+scratch/

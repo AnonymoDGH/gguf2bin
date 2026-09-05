@@ -78,13 +78,13 @@ int gguf_load(const char *path, GGUF *g){
   g->fd=-1;
 #endif
   FILE *f=fopen(path,"rb");
-  if(!f){ fprintf(stderr,"gguf: no abro %s\n",path); return -1; }
+  if(!f){ fprintf(stderr,"gguf: cannot open %s\n",path); return -1; }
 # if defined(_WIN32)
   _fseeki64(f,0,SEEK_END); g->size=(size_t)_ftelli64(f); _fseeki64(f,0,SEEK_SET);
 # else
   fseeko(f,0,SEEK_END); g->size=(size_t)ftello(f); fseeko(f,0,SEEK_SET);
 # endif
-  if(g->size < GGUF_HDR_SIZE){ fprintf(stderr,"gguf: archivo muy chico\n"); fclose(f); return -1; }
+  if(g->size < GGUF_HDR_SIZE){ fprintf(stderr,"gguf: file too small\n"); fclose(f); return -1; }
   /* mmap preferido: pack de modelos grandes sin copiarlos a RAM */
   {
     int mapped=0;
@@ -120,19 +120,19 @@ int gguf_load(const char *path, GGUF *g){
   fclose(f);
   const u8 *end=g->data+g->size;
   u8 *p=g->data;
-  if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: magic invalido\n"); gguf_free(g); return -1; }
+  if(!bounds(p,end,GGUF_HDR_SIZE)||ru32(p)!=GGUF_MAGIC){ fprintf(stderr,"gguf: invalid magic\n"); gguf_free(g); return -1; }
   g->version   = ru32(p+4);
   g->n_tensors = ru64(p+8);
   u64 meta_n   = ru64(p+16);
-  if(g->n_tensors > (1ull<<20) || meta_n > (1ull<<20)){ fprintf(stderr,"gguf: header corrupto (tensors=%llu meta=%llu)\n",(unsigned long long)g->n_tensors,(unsigned long long)meta_n); gguf_free(g); return -1; }
+  if(g->n_tensors > (1ull<<20) || meta_n > (1ull<<20)){ fprintf(stderr,"gguf: corrupt header (tensors=%llu meta=%llu)\n",(unsigned long long)g->n_tensors,(unsigned long long)meta_n); gguf_free(g); return -1; }
   p+=GGUF_HDR_SIZE;
   g->alignment=32;
   for(u64 i=0;i<meta_n;i++){
-    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: metadata truncada\n"); gguf_free(g); return -1; }
+    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: truncated metadata\n"); gguf_free(g); return -1; }
     u64 klen=ru64(p); p+=8;
-    if(klen>4096||!bounds(p,end,klen)){ fprintf(stderr,"gguf: key corrupta (klen=%llu)\n",(unsigned long long)klen); gguf_free(g); return -1; }
+    if(klen>4096||!bounds(p,end,klen)){ fprintf(stderr,"gguf: corrupt key (klen=%llu)\n",(unsigned long long)klen); gguf_free(g); return -1; }
     char *key=(char*)p; p+=klen;
-    if(!bounds(p,end,4)){ fprintf(stderr,"gguf: metadata truncada\n"); gguf_free(g); return -1; }
+    if(!bounds(p,end,4)){ fprintf(stderr,"gguf: truncated metadata\n"); gguf_free(g); return -1; }
     u32 vt=ru32(p); p+=4;
     if(klen==16 && !memcmp(key,"general.alignment",16)){
       if(bounds(p,end,meta_adv(vt)))
@@ -140,21 +140,21 @@ int gguf_load(const char *path, GGUF *g){
     }
     if(!g->alignment) g->alignment=32;
     u8 *np=skip_val(p,end,vt);
-    if(!np){ fprintf(stderr,"gguf: metadata corrupta en key=%.*s\n",(int)(klen<64?klen:64),key); gguf_free(g); return -1; }
+    if(!np){ fprintf(stderr,"gguf: corrupt metadata at key=%.*s\n",(int)(klen<64?klen:64),key); gguf_free(g); return -1; }
     p=np;
   }
   g->t=calloc(g->n_tensors,sizeof(GTensor));
   if(!g->t){ gguf_free(g); return -1; }
   for(u64 i=0;i<g->n_tensors;i++){
-    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: tensor name header truncado\n"); goto fail_tensors; }
+    if(!bounds(p,end,8)){ fprintf(stderr,"gguf: truncated tensor name header\n"); goto fail_tensors; }
     u64 nlen=ru64(p); p+=8;
-    if(nlen>GGUF_MAX_TENSOR_NAME||!bounds(p,end,nlen)){ fprintf(stderr,"gguf: nombre de tensor corrupto (nlen=%llu)\n",(unsigned long long)nlen); goto fail_tensors; }
+    if(nlen>GGUF_MAX_TENSOR_NAME||!bounds(p,end,nlen)){ fprintf(stderr,"gguf: corrupt tensor name (nlen=%llu)\n",(unsigned long long)nlen); goto fail_tensors; }
     g->t[i].name=malloc((size_t)nlen+1);
     if(!g->t[i].name) goto fail_tensors;
     memcpy(g->t[i].name,p,(size_t)nlen); g->t[i].name[nlen]=0; p+=(size_t)nlen;
     if(!bounds(p,end,4)) goto fail_tensors;
     g->t[i].n_dims=ru32(p); p+=4;
-    if(g->t[i].n_dims>6){ fprintf(stderr,"gguf: dims=%u (corrupto)\n",g->t[i].n_dims); goto fail_tensors; }
+    if(g->t[i].n_dims>6){ fprintf(stderr,"gguf: dims=%u (corrupt)\n",g->t[i].n_dims); goto fail_tensors; }
     g->t[i].dims=malloc(g->t[i].n_dims*sizeof(u64));
     if(!g->t[i].dims) goto fail_tensors;
     if(!bounds(p,end,g->t[i].n_dims*8)) goto fail_tensors;

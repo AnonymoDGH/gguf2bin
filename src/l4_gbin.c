@@ -1,4 +1,4 @@
-/* L4 — GGUF → G2BX (formato propio denso, indexado por rol) — FIXED v3.3 */
+/* L4 — GGUF → G2BX (formato propio denso, indexado por rol) — v4.7 */
 #include "g2b.h"
 #include <stdlib.h>
 #include <string.h>
@@ -68,9 +68,9 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   const int is_qwen35=!strcmp(aname,"qwen35");
   /* Stub bailingmoe3 / MLA+MoE+SSM: no soportado en runtime denso Qwen/Llama */
   if(aname[0] && (!strcmp(aname,"bailingmoe3") || !strcmp(aname,"bailingmoe") || strstr(aname,"moe3"))){
-    fprintf(stderr,"g2bx: arquitectura '%s' no soportada (MoE %lld expertos + MLA + SSM). Solo Qwen3/Qwen2/Llama densos.\n",
+    fprintf(stderr,"g2bx: architecture '%s' unsupported (MoE %lld experts + MLA + SSM). Dense Qwen3/Qwen2/Llama only.\n",
       aname, (long long)gguf_meta_i64(g,"bailingmoe3.expert_count"));
-    fprintf(stderr,"g2bx: Ling-3.0-tiny usa MLA (q_lora/kv_lora) + 128 expertos + IQ1_S; requiere llama.cpp. Archivado en D:\\gguf2bin_models\\\n");
+    fprintf(stderr,"g2bx: Ling-3.0-tiny uses MLA (q_lora/kv_lora) + 128 experts + IQ1_S; requires llama.cpp.\n");
     return -1;
   }
   /* Arquitecturas conocidas LLM/Qwen; cualquier otra (p.ej. dflash) se deduce por heurística */
@@ -127,7 +127,7 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
     c->n_rot       =(i32)meta_pref(g,p,"rope.dimension_count");
     if(!c->n_rot) c->n_rot=c->head_dim;
     if(c->ssm_d_state<=0||c->ssm_dt_rank<=0||c->ssm_n_group<=0||c->ssm_inner<=0){
-      fprintf(stderr,"g2bx: qwen35 sin params ssm completos\n"); return -1;
+      fprintf(stderr,"g2bx: qwen35 missing full ssm params\n"); return -1;
     }
   } else { c->n_rot=c->head_dim; }
   if(!c->vocab){
@@ -137,7 +137,7 @@ static int read_cfg(GGUF *g, ModelCfg *c, u8 *arch, u8 *flags){
   if(!gguf_by_name(g,"output.weight")) *flags|=F_TIE_EMBD;
   if(gguf_by_name(g,"blk.0.attn_q_norm.weight") || gguf_by_name(g,"blk.0.attn_k_norm.weight")) *flags|=F_QK_NORM;
   else if(*arch!=ARCH_LLAMA) *flags|=F_QK_NORM;
-  if(c->dim<=0||c->n_layers<=0||c->n_heads<=0){ fprintf(stderr,"g2bx: cfg incompleta arch=%s dim=%d layers=%d\n",aname,c->dim,c->n_layers); return -1; }
+  if(c->dim<=0||c->n_layers<=0||c->n_heads<=0){ fprintf(stderr,"g2bx: incomplete cfg arch=%s dim=%d layers=%d\n",aname,c->dim,c->n_layers); return -1; }
   if(c->seq_len<=0) c->seq_len=2048;
   if(c->seq_len>32768) c->seq_len=32768; /* cap razonable; --ctx lo baja en runtime */
   return 0;
@@ -296,21 +296,21 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
      && ty!=T_Q2_K && ty!=T_Q3_K && ty!=T_Q4_K && ty!=T_Q5_K && ty!=T_Q6_K && ty!=T_Q8_K
      && ty!=T_IQ2_XXS && ty!=T_IQ2_XS && ty!=T_IQ2_S && ty!=T_IQ3_XXS && ty!=T_IQ3_S
      && ty!=T_IQ1_S && ty!=T_IQ1_M && ty!=T_IQ4_NL && ty!=T_IQ4_XS){
-      fprintf(stderr,"g2bx: tipo %u no soportado en tensor %s (omitido)\n", ty, g.t[i].name);
+      fprintf(stderr,"g2bx: type %u unsupported in tensor %s (skipped)\n", ty, g.t[i].name);
       skipped_type++; continue;
     }
     u64 ne=ne_of(&g.t[i]); u32 nbytes=(u32)ggml_type_size(g.t[i].type,ne);
     u8 *tp=gguf_tensor_ptr(&g,&g.t[i]);
-    if(!tp){ fprintf(stderr,"g2bx: tensor %s fuera del fichero (omitido)\n", g.t[i].name); skipped_type++; continue; }
+    if(!tp){ fprintf(stderr,"g2bx: tensor %s outside file (skipped)\n", g.t[i].name); skipped_type++; continue; }
     slots[ns].role=role; slots[ns].layer=layer; slots[ns].type=(u8)g.t[i].type; slots[ns].nbytes=nbytes;
     src_ptr[ns]=tp; src_sz[ns]=nbytes; ne_arr[ns]=ne; ns++;
   }
   if(skipped_type)
-    fprintf(stderr,"g2bx: %u tensores omitidos por tipo no soportado\n", skipped_type);
-  if(!ns){ fprintf(stderr,"g2bx: 0 tensores reconocidos\n"); free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
+    fprintf(stderr,"g2bx: %u tensors skipped (unsupported type)\n", skipped_type);
+  if(!ns){ fprintf(stderr,"g2bx: 0 tensors recognized\n"); free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
   { int has_embd=0; for(u32 i=0;i<ns;i++) if(slots[i].role==R_TOK_EMBD){ has_embd=1; break; }
     if(!has_embd)
-      fprintf(stderr,"g2bx: AVISO — sin token_embd.weight: modelo draft/decode-only\n");
+      fprintf(stderr,"g2bx: WARNING - no token_embd.weight: draft/decode-only model\n");
   }
   for(u32 a=0;a<ns;a++) for(u32 b=a+1;b<ns;b++){
     int la=slots[a].layer==0xFFFF?-1:(int)slots[a].layer; int lb=slots[b].layer==0xFFFF?-1:(int)slots[b].layer;
@@ -334,7 +334,7 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       }
     }
     if(hidden%G || dim%G){
-      fprintf(stderr,"prune: hidden=%d no alineado a %u — poda desactivada\n",hidden,G);
+      fprintf(stderr,"prune: hidden=%d not aligned to %u - prune disabled\n",hidden,G);
       prune=0.f;
     } else {
       u32 nblk_total=hidden/G;
@@ -345,11 +345,11 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       u64 *bscore=malloc((size_t)nblk_total*sizeof(u64));
       u32 *order=malloc((size_t)nblk_total*sizeof(u32));
       if(!kept||!grow||!urw||!bscore||!order){
-        fprintf(stderr,"prune: OOM — desactivada\n"); prune=0.f;
+        fprintf(stderr,"prune: OOM - disabled\n"); prune=0.f;
       } else {
         i32 new_hidden=(i32)(keep*(u32)G);
         if(arch==ARCH_LFM2 && new_hidden<3*dim){
-          fprintf(stderr,"prune: LFM2 necesita hidden>=3*dim (%d); poda desactivada\n",3*dim);
+          fprintf(stderr,"prune: LFM2 needs hidden>=3*dim (%d); prune disabled\n",3*dim);
           prune=0.f; free(kept); free(grow); free(urw); free(bscore); free(order); goto skip_prune;
         }
         u64 old_bytes=0,new_bytes=0;
@@ -405,7 +405,7 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           /* rebuild gate/up: copia de runs de filas */
           u8 *ng=malloc((size_t)new_hidden*grs), *nu=malloc((size_t)new_hidden*urs);
           u8 *nd=malloc((size_t)dim*(size_t)new_hidden/G*drb);
-          if(!ng||!nu||!nd){ fprintf(stderr,"prune: OOM en capa %d\n",L); free(ng);free(nu);free(nd); break; }
+          if(!ng||!nu||!nd){ fprintf(stderr,"prune: OOM in layer %d\n",L); free(ng);free(nu);free(nd); break; }
           /* gate/up: las filas kept se copian por runs contiguos */
           { u32 i=0; u32 dst=0;
             while(i<(u32)hidden){
@@ -439,7 +439,7 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           new_bytes+=grs*(size_t)new_hidden+urs*(size_t)new_hidden+(size_t)dim*(size_t)new_hidden/G*drb;
         }
         c.hidden_dim=new_hidden;
-        fprintf(stderr,"prune: FFN %d -> %d (-%.0f%%): pesos %.0f MB -> %.0f MB\n",
+        fprintf(stderr,"prune: FFN %d -> %d (-%.0f%%): weights %.0f MB -> %.0f MB\n",
           hidden,new_hidden,100.f*prune,old_bytes/1048576.f,new_bytes/1048576.f);
         free(kept); free(grow); free(urw); free(bscore); free(order);
       }
@@ -482,16 +482,21 @@ skip_prune:
   }
   while(written<data_size){ u64 pad=data_size-written; if(pad>64) pad=64; wr &= fwrite(zeros,1,(size_t)pad,o)==(size_t)pad; written+=pad; }
   free(zeros);
-  Tokenizer tk; if(tok_from_gguf(&g,&tk)==0){ tok_write_section(o,&tk); fprintf(stderr,"  tokenizer: %d tokens, %d merges (bos=%d eos=%d)\n",tk.n,tk.nmerges,tk.bos,tk.eos); tok_free(&tk); } else fprintf(stderr,"  tokenizer: NO disponible\n");
+  Tokenizer tk; if(tok_from_gguf(&g,&tk)==0){ tok_write_section(o,&tk); fprintf(stderr,"  tokenizer: %d tokens, %d merges (bos=%d eos=%d)\n",tk.n,tk.nmerges,tk.bos,tk.eos); tok_free(&tk); } else fprintf(stderr,"  tokenizer: unavailable\n");
   fclose(o);
-  if(!wr){ fprintf(stderr,"g2bx: error de escritura en %s (disco lleno?)\n",out_path); }
-  fprintf(stderr,"g2bx pack -> %s\n  arch=%u flags=0x%02x layers=%d dim=%d head_dim=%d kv=%d vocab=%d\n  slots=%u weight_bytes=%llu (GGUF era %llu)\n  rope_theta=%.0f qk_norm=%s tie_embd=%s\n",out_path,arch,flags,c.n_layers,c.dim,c.head_dim,c.n_kv_heads,c.vocab,ns,(unsigned long long)data_size,(unsigned long long)g.size,c.rope_theta,(flags&F_QK_NORM)?"yes":"no",(flags&F_TIE_EMBD)?"yes":"no");
+  if(!wr){ fprintf(stderr,"g2bx: write error on %s (disk full?)\n",out_path); }
+  fprintf(stderr,"g2bx pack -> %s\n  arch=%u flags=0x%02x layers=%d dim=%d head_dim=%d kv=%d vocab=%d\n  slots=%u weight_bytes=%llu (GGUF was %llu)\n  rope_theta=%.0f qk_norm=%s tie_embd=%s\n",out_path,arch,flags,c.n_layers,c.dim,c.head_dim,c.n_kv_heads,c.vocab,ns,(unsigned long long)data_size,(unsigned long long)g.size,c.rope_theta,(flags&F_QK_NORM)?"yes":"no",(flags&F_TIE_EMBD)?"yes":"no");
   free(slots); free(src_ptr); free(src_sz); free(ne_arr); for(u32 i=0;i<ns;i++) if(conv_ptr[i]) free(conv_ptr[i]); free(conv_ptr); gguf_free(&g); return wr?0:-1;
 }
 int g2bx_info(const char *path){
-  FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"g2bx: no abro %s\n",path); return -1; }
+  FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"g2bx: cannot open %s\n",path); return -1; }
   char magic[4]; u16 ver; u8 arch,flags; ModelCfg c; u32 ns;
-  if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)||fread(&ver,2,1,f)!=1||fread(&arch,1,1,f)!=1||fread(&flags,1,1,f)!=1||fread(&c,sizeof c,1,f)!=1||fread(&ns,4,1,f)!=1){ fprintf(stderr,"g2bx: cabecera invalida\n"); fclose(f); return -1; }
+  memset(&c,0,sizeof c);
+  if(fread(magic,1,4,f)!=4||memcmp(magic,G2BX_MAGIC,4)||fread(&ver,2,1,f)!=1||fread(&arch,1,1,f)!=1||fread(&flags,1,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
+  if(ver==0||ver>G2BX_VER_MAX){ fprintf(stderr,"g2bx: unsupported version %u (max %u)\n",ver,G2BX_VER_MAX); fclose(f); return -1; }
+  if(ver>=2){ if(fread(&c,sizeof c,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; } }
+  else { if(fread(&c,G2BX_CFG_V1,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; } }
+  if(fread(&ns,4,1,f)!=1){     fprintf(stderr,"g2bx: invalid header\n"); fclose(f); return -1; }
   static const char *an[]={"llama","qwen2","qwen3","lfm2","qwen35"}; printf("G2BX v%u arch=%s flags=0x%02x\n",ver, arch<5?an[arch]:"?",flags);
   printf("  dim=%d hidden=%d layers=%d heads=%d kv=%d head_dim=%d\n",c.dim,c.hidden_dim,c.n_layers,c.n_heads,c.n_kv_heads,c.head_dim);
   printf("  vocab=%d seq=%d eps=%g rope_theta=%.0f\n",c.vocab,c.seq_len,c.eps,c.rope_theta);

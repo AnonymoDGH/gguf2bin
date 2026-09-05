@@ -143,6 +143,14 @@ docs/RESEARCH.md   research notes and performance roadmap
 <details>
 <summary><b>📜 Changelog</b></summary>
 
+#### v4.9 — IQ1_S + Q3_K fused (27B desatascado)
+- **IQ1_S integer dot** (`madd`+SAD, act Q8, 1 hsum/escala por 32): the 264 IQ1_S slots (~3.4 GB) ran scalar fallback; the old fused prototype existed but was never dispatched. Wired into `matmul_q`/`matmul_q_b`, validated by new `tools/iq1check` (vs exact-Q8 math: maxrel 5e-4).
+- **Q3_K integer dot** (values −4..3, per-16 scales, bias −32): covers the 248k head (521 MB) + dense Q3_K models. Validated by new `tools/q3kcheck` incl. a 256-position one-hot sweep (caught a half-vector `cvtepi8` bug pre-ship: high 8 elems silently dropped).
+- 27B hybrid (Qwen3.8, hybrid → always sequential decode): stock 132.7 s → **79.6 s (−40 %, 1.67×)** for prompt+2 tokens, warm page cache, i5-6200U. Greedy output differs in argmax (Q8 approximation on 1.5-bit weights — both outputs are IQ1_S-grade mojibake); math bounded by the harnesses above.
+
+#### v4.8 — Blocked prefill (G=4 token blocking)
+- **Weight traffic ÷4 in `matmul_q4_0_b` / `matmul_q4_0s_b`**: each weight row is unpacked once and reused for 4 tokens (was: re-streamed per token, 16× per batch). Qwen3-0.6B Q4_0 prefill 38.9 → **53.7 tok/s (+38 %)** and Qwen2.5-3B Q4_0 7.0 → **9.6 tok/s (+37 %)** (interleaved A/B on i5-6200U). Bit-exact (`prefilltest` diff 0 incl. 3B GQA, `q4bcheck` 5/5, ppl identical 58.709). Decode untouched (3B: 5.4 = 5.4); 27B IQ1_S hybrid output byte-identical to stock.
+
 #### v4.7 — Q4_0S_PSY (psicoacústico) + fallback TLS
 - **Q4_0S_PSY**: 2 escalas fp16 por 256 (132B vs 130B) — baja 128 + alta 128, como MP3. `pack --psy` → +6% speed y mejor ppl que Q4_0S. Llama-3.2-1B 14.7 tok/s (PSY) → 30.6 con `--mv 0.5` (+108%). Fallback IQ ahora TLS buf → qwen38 no hace malloc por fila.
 

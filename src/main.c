@@ -1,4 +1,4 @@
-/* CLI: pack | info | run | synth | chat | bench — runtime G2BX v3.3 */
+/* CLI: pack | info | run | synth | chat | bench — runtime G2BX v4.7 */
 #include "g2b.h"
 #include <stdlib.h>
 #include <string.h>
@@ -35,9 +35,9 @@ static void set_threads(int n){
 #if defined(_OPENMP)
   if(n>0) omp_set_num_threads(n);
   int t = n>0?n:omp_get_num_threads();
-  fprintf(stderr,"hilos: usando %d core(s)\n", t);
+  fprintf(stderr,"threads: using %d core(s)\n", t);
 #else
-  fprintf(stderr,"hilos: compilado sin OpenMP (usa -fopenmp para acelerar)\n");
+  fprintf(stderr,"threads: built without OpenMP (use -fopenmp for speed)\n");
 #endif
 }
 
@@ -49,11 +49,13 @@ static void apply_fast(int *nthr){
   omp_set_dynamic(0);
 #endif
 #if defined(_WIN32)
-  SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+  if(!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+    fprintf(stderr,"fast: warning: no permission for high priority (continuing normally)\n");
 #else
-  setpriority(PRIO_PROCESS, 0, -10);
+  if(setpriority(PRIO_PROCESS, 0, -10)!=0)
+    fprintf(stderr,"fast: warning: no permission for nice -10 (continuing normally)\n");
 #endif
-  fprintf(stderr,"fast: prioridad alta, %d hilos, sin swap\n", *nthr);
+  fprintf(stderr,"fast: high priority, %d threads, swap disabled\n", *nthr);
 }
 
 typedef struct {
@@ -78,37 +80,37 @@ static int recent_snapshot(const RecentBuf *r, i32 *out, int maxn){
 
 static void usage(const char *a0){
   fprintf(stderr,
-    "gguf2bin2 — GGUF -> G2BX (formato propio) -> inferencia Qwen3/Llama\n\n"
+    "gguf2bin2 - GGUF -> G2BX (own format) -> Qwen3/Llama/LFM2 inference v4.9\n\n"
     "  %s pack   <model.gguf> <out.g2bx> [--q4] [--prune F]\n"
-    "                     --prune 0.5  poda el 50%% del FFN por importancia\n"
-    "                     (efecto MoE: menos pesos/token -> más tok/s)\n"
+    "                     --prune 0.5  prune 50%% of the FFN by importance\n"
+    "                     (MoE effect: fewer weights/token -> more tok/s)\n"
     "  %s info   <model.g2bx|gguf>\n"
-    "  %s run    <model> [texto] [opts]\n"
-    "      -n N / --n N  tokens a generar (def 64; chat def 256)\n"
-    "      -t TEMP       temperatura (0=greedy, def 0.7)\n"
-    "      --top-k K     top-k (def 40)\n"
-    "      --top-p P     nucleus p (def 0.9)\n"
-    "      --repeat-penalty R  (def 1.1)\n"
-    "      --tokens a,b  ids directos\n"
+    "  %s run    <model> [text] [opts]\n"
+    "      -n N / --n N  tokens to generate (default 64; chat default 256)\n"
+    "      -t TEMP       temperature (0=greedy, default 0.7)\n"
+    "      --top-k K     top-k (default 40)\n"
+    "      --top-p P     nucleus p (default 0.9)\n"
+    "      --repeat-penalty R  (default 1.1)\n"
+    "      --tokens a,b  raw token ids\n"
     "      --bos         prepend BOS\n"
-    "      --gpu         dual band CPU+GPU del head (requiere Vulkan estable)\n"
+    "      --gpu         CPU+GPU dual band for the head (needs stable Vulkan)\n"
     "  %s synth  <out.g2bx>\n"
     "  %s bench  <model> [-n N] [--prefill N]\n"
     "  %s chat   <model> [-n N] [-t TEMP] [--system TXT|--no-system] [--no-think|--think]\n"
-    "  %s ppl    <model> [-f fichero|-] [-n max_tokens]\n\n"
-    "RAM / contexto (run, chat, bench):\n"
-    "      -c N / --ctx N     contexto efectivo (KV cache) en runtime (def: el del modelo)\n"
-    "      --q8-kv            KV cache cuantizada Q8_0 (~3.8x menos RAM que F32)\n"
-    "      --f32-kv           fuerza KV cache F32 (desactiva el auto-Q8 >1GB)\n"
-    "      --max-ram MB       presupuesto RAM: auto-Q8 + baja ctx hasta caber (ej: 2048)\n"
-    "      --swap [PATH]      KV cache respaldada en disco (~D: como RAM); sin PATH usa D:\\\n"
-    "      --fast             exprime todo: prioridad alta, max hilos, sin swap\n"
-    "      --threads N        numero de cores OpenMP (def: todos)\n"
-    "      --drop N           omite los N bloques menos influyentes (ShortGPT)\n"
-    "      --mv F             Swapeculative 0.0..1.0 skip FFN/SSM\n\n"
-    "bench extra:\n"
-    "      --prefill N        mide tok/s de procesamiento de prompt (sin logits)\n\n"
-    "Ejemplos:\n"
+    "  %s ppl    <model> [-f file|-] [-n max_tokens]\n\n"
+    "RAM / context (run, chat, bench):\n"
+    "      -c N / --ctx N     effective context (KV cache) at runtime (default: model's)\n"
+    "      --q8-kv            quantized Q8_0 KV cache (~3.8x less RAM than F32)\n"
+    "      --f32-kv           force F32 KV cache (disables auto-Q8 above 1GB)\n"
+    "      --max-ram MB       RAM budget: auto-Q8 + shrink ctx until it fits (e.g. 2048)\n"
+    "      --swap [PATH]      file-backed KV cache; without PATH uses D:\\ if present, else system temp\n"
+    "      --fast             everything out: high priority, max threads, no swap\n"
+    "      --threads N        OpenMP core count (default: all)\n"
+    "      --drop N           skip the N least-influential blocks (ShortGPT)\n"
+    "      --mv F             Swapeculative 0.0..1.0 FFN/SSM skip\n\n"
+    "bench extras:\n"
+    "      --prefill N        measure prompt-processing tok/s (no logits)\n\n"
+    "Examples:\n"
     "  %s run qwen.g2bx \"The capital of France is\" -n 20 -t 0\n"
     "  %s chat llama.g2bx --fast --q8-kv -n 256\n"
     "  %s bench qwen.g2bx --max-ram 2048\n",
@@ -140,13 +142,13 @@ static int cmd_pack(int argc, char **argv){
     else if(!strcmp(argv[i],"--prune")&&i+1<argc) prune=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--calib")&&i+1<argc) calib_file=argv[++i];
   }
-  if(prune>0.f && (prune<=0.001f||prune>=0.9f)){ fprintf(stderr,"pack: --prune debe estar en (0,0.9)\n"); return 1; }
+  if(prune>0.f && (prune<=0.001f||prune>=0.9f)){ fprintf(stderr,"pack: --prune must be in (0,0.9)\n"); return 1; }
   if(prune<=0.f) return g2bx_pack_prune(argv[2],argv[3],downq4,0.f)?1:0;
 
   /* dos fases: pack completo -> calibrar activaciones -> repack podado */
   char tmp[1280];
   snprintf(tmp,sizeof tmp,"%s.calib.g2bx",argv[3]);
-  fprintf(stderr,"pack: fase 1/2 — pack completo para calibrar\n");
+  fprintf(stderr,"pack: phase 1/2 - full pack for calibration\n");
   if(g2bx_pack_prune(argv[2],tmp,downq4,0.f)){ remove(tmp); return 1; }
   Model m;
   if(model_load_g2bx(tmp,&m)){ remove(tmp); return 1; }
@@ -156,15 +158,15 @@ static int cmd_pack(int argc, char **argv){
   if(calib_file){
     FILE *f=fopen(calib_file,"rb");
     if(f){ char buf[16384]; size_t r; while((r=fread(buf,1,sizeof buf,f))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; } fclose(f); }
-    else fprintf(stderr,"pack: no abro %s — uso corpus embebido\n",calib_file);
+    else fprintf(stderr,"pack: cannot open %s - using embedded corpus\n",calib_file);
   }
   if(!text || len==0){ text=(char*)DEFAULT_CALIB; len=strlen(DEFAULT_CALIB); }
-  if(!m.tok){ fprintf(stderr,"pack: el modelo no trae tokenizer — no se puede --prune\n"); if(text!=(char*)DEFAULT_CALIB) free(text); model_free(&m); remove(tmp); return 1; }
+  if(!m.tok){ fprintf(stderr,"pack: model has no tokenizer - cannot --prune\n"); if(text!=(char*)DEFAULT_CALIB) free(text); model_free(&m); remove(tmp); return 1; }
   i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
   if(text!=(char*)DEFAULT_CALIB) free(text);
   if(nt>ctx) nt=ctx;
-  if(nt<64){ fprintf(stderr,"pack: calibración insuficiente (%d tokens)\n",nt); free(ids); model_free(&m); remove(tmp); return 1; }
-  fprintf(stderr,"pack: calibrando con %d tokens...\n",nt);
+  if(nt<64){ fprintf(stderr,"pack: insufficient calibration (%d tokens)\n",nt); free(ids); model_free(&m); remove(tmp); return 1; }
+  fprintf(stderr,"pack: calibrating on %d tokens...\n",nt);
   int ok = (model_collect_stats(&m,ids,nt)==0 && m.ffn_stats!=NULL);
   free(ids);
   if(!ok){ model_free(&m); remove(tmp); return 1; }
@@ -238,7 +240,7 @@ static int apply_ram_opts(Model *m, i32 ctx, u64 max_ram, int q8kv, int f32kv, c
   else if(q8kv){ m->flags |= F_KV_Q8; realloc=1; }
   else if(max_ram==0 && ctx<=0 && model_kv_bytes(m,0) > ((u64)1<<30)){
     m->flags |= F_KV_Q8; realloc=1;
-    fprintf(stderr,"ram: KV en F32 dispararia >1 GB -> activo KV Q8_0 automatico (--f32-kv para forzar)\n");
+    fprintf(stderr,"ram: F32 KV would exceed 1 GB -> enabling Q8_0 KV automatically (--f32-kv to force)\n");
   }
   if(max_ram>0){
     u64 budget = (u64)max_ram << 20;
@@ -251,11 +253,11 @@ static int apply_ram_opts(Model *m, i32 ctx, u64 max_ram, int q8kv, int f32kv, c
   if(swap && *swap){
     const char *p = (!strcmp(swap,"@")) ? default_swap() : swap;
     if(model_enable_swap(m,p))
-      fprintf(stderr,"swap: no se pudo usar %s (prueba --q8-kv en su lugar)\n", p);
+      fprintf(stderr,"swap: cannot use %s (try --q8-kv instead)\n", p);
   }
   model_ram_report(m);
   if(m->c.seq_len && ctx>0 && ctx!=m->ctx)
-    fprintf(stderr,"model: contexto efectivo %d (max del modelo %d)\n", m->ctx, m->c.seq_len);
+    fprintf(stderr,"model: effective context %d (model max %d)\n", m->ctx, m->c.seq_len);
   return 0;
 }
 
@@ -420,7 +422,7 @@ static int cmd_run(int argc, char **argv){
   if(cyber) cyber_load_lora(&m,cyber);
   if(bvh_ratio>0){ m.use_bvh=1; m.bvh_keep=bvh_ratio; fprintf(stderr,"[bvh] sparse %.2f\n",bvh_ratio); }
   if(cyber) cyber_load_lora(&m,cyber);
-  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
+  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuing CPU-only\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
@@ -428,7 +430,7 @@ static int cmd_run(int argc, char **argv){
   if(ndrop>0 && m.tok){
     i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
-    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
+    if(use>=8){ model_autodrop(&m,ids,use,ndrop); } free(ids); }
   if(text[0] && m.tok){
     i32 *enc; i32 en=tokenize_prefix(m.tok,text,&enc);
     if(en>0){
@@ -449,11 +451,11 @@ static int cmd_run(int argc, char **argv){
 
   for(i32 i=0;i<np;){
     if(pos >= m.ctx){
-      fprintf(stderr,"\nrun: contexto lleno (ctx=%d); truncando prompt\n", m.ctx);
+      fprintf(stderr,"\nrun: context full (ctx=%d); truncating prompt\n", m.ctx);
       break;
     }
     if(prompt[i]<0 || prompt[i]>=m.c.vocab){
-      fprintf(stderr,"run: token id %d fuera de vocab (%d)\n", prompt[i], m.c.vocab);
+      fprintf(stderr,"run: token id %d out of vocab (%d)\n", prompt[i], m.c.vocab);
       free(logits); model_free(&m); return 1;
     }
     i32 pb=m.pf_B>0?m.pf_B:8;
@@ -475,7 +477,7 @@ static int cmd_run(int argc, char **argv){
   }
   for(i32 i=0;i<n_tok;i++){
     if(pos >= m.ctx){
-      fprintf(stderr,"\nrun: contexto lleno (ctx=%d); stop\n", m.ctx);
+      fprintf(stderr,"\nrun: context full (ctx=%d); stop\n", m.ctx);
       break;
     }
     int rp_n = recent_snapshot(&recent, rep_tmp, RECENT_USE);
@@ -520,13 +522,13 @@ static int cmd_ppl(int argc, char **argv){
   if(ndrop>0 && m.tok){
     i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
-    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids);
+    if(use>=8){ model_autodrop(&m,ids,use,ndrop); } free(ids);
   }
-  if(!m.tok){ fprintf(stderr,"ppl: el modelo no trae tokenizer\n"); model_free(&m); return 1; }
+  if(!m.tok){ fprintf(stderr,"ppl: model has no tokenizer\n"); model_free(&m); return 1; }
   char *text=NULL; size_t cap=0, len=0;
   if(file && strcmp(file,"-")){
     FILE *f=fopen(file,"rb");
-    if(!f){ fprintf(stderr,"ppl: no abro %s\n",file); model_free(&m); return 1; }
+    if(!f){ fprintf(stderr,"ppl: cannot open %s\n",file); model_free(&m); return 1; }
     char buf[65536]; size_t r;
     while((r=fread(buf,1,sizeof buf,f))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; }
     fclose(f);
@@ -534,7 +536,7 @@ static int cmd_ppl(int argc, char **argv){
     char buf[65536]; size_t r;
     while((r=fread(buf,1,sizeof buf,stdin))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; }
   }
-  if(!text || len==0){ fprintf(stderr,"ppl: texto vacio\n"); free(text); model_free(&m); return 1; }
+  if(!text || len==0){ fprintf(stderr,"ppl: empty text\n"); free(text); model_free(&m); return 1; }
   text[len]=0;
   i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
   free(text);
@@ -563,7 +565,7 @@ static int cmd_ppl(int argc, char **argv){
       count++;
     }
   }
-  printf("ppl(%s): tokens=%d evaluados=%d nll/token=%.4f perplexity=%.3f\n",
+  printf("ppl(%s): tokens=%d evaluated=%d nll/token=%.4f perplexity=%.3f\n",
     path,nt,count,nll/(count?count:1),exp(nll/(count?count:1)));
   free(logits); free(ids); model_free(&m); return 0;
 }
@@ -610,15 +612,15 @@ static int cmd_chat(int argc, char **argv){
   }
   Model m; if(load_any(path,&m)) return 1;
   if(mv_ratio>0) m.mv_ratio=mv_ratio;
-  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuo solo CPU\n");
+  if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuing CPU-only\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
   if(m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", m.mv_ratio);
   if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
-    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
-  if(!m.tok){ fprintf(stderr,"chat: el modelo no trae tokenizer. Re-empaqueta\n"); model_free(&m); return 1; }
+    if(use>=8){ model_autodrop(&m,ids,use,ndrop); } free(ids); }
+  if(!m.tok){ fprintf(stderr,"chat: model has no tokenizer. Re-pack it\n"); model_free(&m); return 1; }
   Tokenizer *tk=m.tok;
   /* ChatML (Qwen2/3, LFM2) vs Llama 3.x Instruct */
   i32 im_start=find_tok(tk,"<|im_start|>"), im_end=find_tok(tk,"<|im_end|>");
@@ -629,7 +631,7 @@ static int cmd_chat(int argc, char **argv){
   int tpl_llama = (hstart>=0 && hend>=0 && eot>=0);
   int tpl_chatml = (im_start>=0 && im_end>=0);
   if(!tpl_llama && !tpl_chatml){
-    fprintf(stderr,"chat: sin plantilla (ni ChatML <|im_start|> ni Llama 3 <|eot_id|>)\n");
+    fprintf(stderr,"chat: no template (neither ChatML <|im_start|> nor Llama 3 <|eot_id|>)\n");
     model_free(&m); return 1;
   }
   if(tpl_llama && tpl_chatml){
@@ -644,7 +646,7 @@ static int cmd_chat(int argc, char **argv){
   if(seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)seed);
   i32 *conv=NULL; i32 cn=0, ccap=2048; conv=malloc((size_t)ccap*sizeof(i32));
   if(!conv){ free(logits); model_free(&m); return 1; }
-#define PUSH(x) do{ if(cn>=ccap){ if(ccap>=(1<<20)){ fprintf(stderr,"chat: contexto excede 1M tokens\n"); free(logits); model_free(&m); free(conv); return 1; } ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); free(conv); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
+#define PUSH(x) do{ if(cn>=ccap){ if(ccap>=(1<<20)){ fprintf(stderr,"chat: context exceeds 1M tokens\n"); free(logits); model_free(&m); free(conv); return 1; } ccap*=2; i32 *tmp=realloc(conv,(size_t)ccap*sizeof(i32)); if(!tmp){ fprintf(stderr,"chat: OOM\n"); free(logits); model_free(&m); free(conv); return 1; } conv=tmp; } conv[cn++]=(x); }while(0)
 #define PUSH_STR(s) do{ i32 *_ids=NULL; i32 _n=tok_encode(tk,(s),&_ids); for(i32 _i=0;_i<_n;_i++) PUSH(_ids[_i]); free(_ids); }while(0)
   i32 sys_len=0;
   if(tk->bos>=0) PUSH(tk->bos);
@@ -662,10 +664,10 @@ static int cmd_chat(int argc, char **argv){
   i32 pos=0, fed=0;
   char line[8192];
   const char *aname = m.arch==ARCH_LLAMA?"Llama":m.arch==ARCH_LFM2?"LFM2":m.arch==ARCH_QWEN2?"Qwen2":"Qwen3";
-  printf("=== Chat %s %s (escribe 'salir') ===\n", aname,
+  printf("=== Chat %s %s (type 'exit') ===\n", aname,
     tpl_llama?"[llama3]":(no_think?"[no-think]":(show_think?"[thinking]":"[think oculto]")));
   for(;;){
-    printf("\nTu> "); fflush(stdout);
+    printf("\nYou> "); fflush(stdout);
     if(!fgets(line,sizeof line,stdin)) break;
     size_t ll=strlen(line); while(ll>0 && (line[ll-1]=='\n'||line[ll-1]=='\r')) line[--ll]=0;
     if(!strcmp(line,"salir")||!strcmp(line,"exit")) break;
@@ -690,7 +692,7 @@ static int cmd_chat(int argc, char **argv){
         i32 start=cn-tail; if(start<sys_len) start=sys_len;
         while(start<cn && conv[start]!=turn_start) start++;
         if(start>=cn){ start=cn-16; if(start<sys_len) start=sys_len; }
-        fprintf(stderr,"chat: contexto lleno (%d/%d) -> compacto a system + %d tokens recientes\n",
+        fprintf(stderr,"chat: context full (%d/%d) -> compacted to system + %d recent tokens\n",
           pos,m.ctx,cn-start);
         memmove(conv+sys_len,conv+start,(size_t)(cn-start)*sizeof(i32));
         cn=sys_len+(cn-start);
@@ -699,7 +701,7 @@ static int cmd_chat(int argc, char **argv){
     }
     for(; fed<cn;){
       if(pos >= m.ctx){
-        fprintf(stderr,"chat: contexto lleno (ctx=%d)\n", m.ctx);
+        fprintf(stderr,"chat: context full (ctx=%d)\n", m.ctx);
         break;
       }
       i32 pb=m.pf_B>0?m.pf_B:8;
@@ -722,7 +724,7 @@ static int cmd_chat(int argc, char **argv){
     int in_think=0;
     for(i32 step=0; step<gen_n; step++){
       if(pos >= m.ctx){
-        fprintf(stderr,"\nchat: contexto lleno; stop\n");
+        fprintf(stderr,"\nchat: context full; stop\n");
         break;
       }
       int rp_n = recent_snapshot(&recent, rep_tmp, RECENT_USE);
@@ -792,14 +794,14 @@ static int cmd_bench(int argc, char **argv){
   }
   Model m; if(load_any(argv[2],&m)) return 1;
   if(mv_ratio>0) m.mv_ratio=mv_ratio;
-  if(gpu && !vk_dual_start(&m,argv[2])) fprintf(stderr,"[gpu] continuo solo CPU\n");
+  if(gpu && !vk_dual_start(&m,argv[2])) fprintf(stderr,"[gpu] continuing CPU-only\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
   if(fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr);
   if(m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", m.mv_ratio);
   if(ndrop>0 && m.tok){ i32 *ids=NULL; i32 nt=tok_encode(m.tok,(char*)DEFAULT_CALIB,&ids);
     i32 use=nt; i32 mc=(m.ctx>0?m.ctx:1024); if(use>mc) use=mc;
-    if(use>=8) model_autodrop(&m,ids,use,ndrop); free(ids); }
+    if(use>=8){ model_autodrop(&m,ids,use,ndrop); } free(ids); }
   rng_seed(seed);
   i32 maxctx = m.ctx>0?m.ctx:m.c.seq_len;
   if(prefill_n>0){
@@ -824,7 +826,7 @@ static int cmd_bench(int argc, char **argv){
       if(sec<best) best=sec;
     }
     if(best<1e-9) best=1e-9;
-    fprintf(stderr,"bench-prefill: %d tokens en %.3fs -> %.1f tok/s (min de 3) (dim=%d L=%d ctx=%d)\n",
+    fprintf(stderr,"bench-prefill: %d tokens in %.3fs -> %.1f tok/s (min of 3) (dim=%d L=%d ctx=%d)\n",
       prefill_n,best,prefill_n/best,m.c.dim,m.c.n_layers,m.ctx);
     model_free(&m); return 0;
   }
@@ -847,22 +849,22 @@ static int cmd_bench(int argc, char **argv){
 
 static int cmd_cyber(int argc, char **argv){
  fprintf(stderr,"[cyber] cmd enter\n");
- if(argc<4){ fprintf(stderr,"uso: %s cyber-train <model.g2bx> <dataset.jsonl> [-o lora.bin] [--steps N] [--lr F] [--replay F] [--particle] [--temp F]\n", argv[0]); return 1; }
+  if(argc<4){ fprintf(stderr,"usage: %s cyber-train <model.g2bx> <dataset.jsonl> [-o lora.bin] [--steps N] [--lr F] [--replay F] [--particle] [--temp F]\n", argv[0]); return 1; }
  const char *model=argv[2], *data=argv[3]; const char *out="cyber_mrna.lora"; int steps=200; float lr=1e-4f, replay=0.2f; int use_particle=0; float temp=54.4f;
  for(int i=4;i<argc;i++){ if(!strcmp(argv[i],"-o")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--steps")&&i+1<argc) steps=atoi(argv[++i]); else if(!strcmp(argv[i],"--lr")&&i+1<argc) lr=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--replay")&&i+1<argc) replay=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--particle")) use_particle=1; else if(!strcmp(argv[i],"--temp")&&i+1<argc) temp=(float)atof(argv[++i]); }
  fprintf(stderr,"[cyber] load %s\n", model);
- Model m; if(load_any(model,&m)){ fprintf(stderr,"[cyber] load fail\n"); return 1; }
+  Model m; if(load_any(model,&m)){ fprintf(stderr,"[cyber] load failed\n"); return 1; }
  fprintf(stderr,"[cyber] loaded dim=%d L=%d\n", m.c.dim, m.c.n_layers);
  int rc= use_particle? cyber_train_particle(&m,data,steps,temp) : cyber_train(&m,data,steps,lr,replay);
  if(!rc) rc=cyber_save_lora(&m,out);
  model_free(&m); return rc?1:0;
 }
 static int cmd_cyber_pack(int argc, char **argv){
- if(argc<5){ fprintf(stderr,"uso: %s cyber-pack <base.g2bx> <lora.bin> <out.g2bx>\n", argv[0]); return 1; }
+  if(argc<5){ fprintf(stderr,"usage: %s cyber-pack <base.g2bx> <lora.bin> <out.g2bx>\n", argv[0]); return 1; }
  return cyber_pack_merge(argv[2],argv[3],argv[4])?1:0;
 }
 static int cmd_bench_cyber(int argc, char **argv){
- if(argc<3){ fprintf(stderr,"uso: %s bench-cyber <model> [--cyber lora.bin]\n", argv[0]); return 1; }
+  if(argc<3){ fprintf(stderr,"usage: %s bench-cyber <model> [--cyber lora.bin]\n", argv[0]); return 1; }
  const char *lora=NULL; for(int i=3;i<argc;i++) if(!strcmp(argv[i],"--cyber")&&i+1<argc) lora=argv[++i];
  Model m; if(load_any(argv[2],&m)) return 1;
  if(lora) cyber_load_lora(&m,lora);
@@ -877,7 +879,7 @@ int main(int argc, char **argv){
   SetConsoleOutputCP(65001);
   SetConsoleCP(65001);
 #endif
-  fprintf(stderr,"[main] arranque\n");
+  fprintf(stderr,"[main] start\n");
   if(argc<2){ usage(argv[0]); return 1; }
   if(!strcmp(argv[1],"--gpu-worker")) return vk_worker_main(argc,argv);
   if(!strcmp(argv[1],"pack"))  return cmd_pack(argc,argv);

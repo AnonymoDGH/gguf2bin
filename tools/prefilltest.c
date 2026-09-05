@@ -1,4 +1,4 @@
-/* prefilltest.c — verifica que model_prefill (batcheado) produce los mismos
+﻿/* prefilltest.c â€” verifica que model_prefill (batcheado) produce los mismos
    logits que el forward secuencial token a token. */
 #include "g2b.h"
 #include <stdio.h>
@@ -6,12 +6,12 @@
 #include <math.h>
 
 int main(int argc, char **argv){
-  if(argc<2){ fprintf(stderr,"uso: prefilltest <model.g2bx> [ntok]\n"); return 1; }
+  if(argc<2){ fprintf(stderr,"usage: prefilltest <model.g2bx> [ntok]\n"); return 1; }
   int ntok = argc>2 ? atoi(argv[2]) : 40;
   Model m, s;
   if(model_load_g2bx(argv[1],&m)){ return 1; }
   if(model_load_g2bx(argv[1],&s)){ model_free(&m); return 1; }
-  if(!m.ix_global[R_TOK_EMBD]){ fprintf(stderr,"sin token_embd\n"); model_free(&m); model_free(&s); return 2; }
+  if(!m.ix_global[R_TOK_EMBD]){ fprintf(stderr,"no token_embd\n"); model_free(&m); model_free(&s); return 2; }
   int ctx = m.c.seq_len; if(ctx>512) ctx=512;
   if(ntok>ctx-4) ntok=ctx-4;
   model_set_ctx(&m,ctx);
@@ -24,7 +24,7 @@ int main(int argc, char **argv){
   for(int i=0;i<ntok;i++){ rs^=rs>>12; rs^=rs<<25; rs^=rs>>27; toks[i]=(i32)((rs*2685821657736338717ull)%(u64)(m.c.vocab>16?m.c.vocab:16)); }
 
   if(model_prefill(&m,toks,ntok,0,lb)){
-    fprintf(stderr,"prefill fallo (rc!=0): sin buffers o error\n");
+    fprintf(stderr,"prefill failed (rc!=0): no buffers or error\n");
     free(lb); free(ls); free(toks); model_free(&m); model_free(&s); return 3;
   }
   for(int i=0;i<ntok;i++)

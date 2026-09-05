@@ -1,4 +1,4 @@
-#include "g2b.h"
+﻿#include "g2b.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -70,7 +70,7 @@ int cyber_train(Model *m, const char *dataset, int steps, float lr, float replay
  fprintf(stderr,"cyber: REAL train dataset=%s steps=%d lr=%.5f replay=%.2f\n", dataset, steps, lr, replay); fflush(stderr);
  if(!m||!dataset) return -1;
  if(lora_alloc(m,32)){ fprintf(stderr,"cyber: lora_alloc fail\n"); return -1; }
- FILE *f=fopen(dataset,"rb"); if(!f){ fprintf(stderr,"cyber: no abro %s\n",dataset); return -1; }
+ FILE *f=fopen(dataset,"rb"); if(!f){ fprintf(stderr,"cyber: cannot open %s\n",dataset); return -1; }
  char **lines=NULL; int nlines=0, cap=0;
  char line[8192];
  while(fgets(line,sizeof line,f)){
@@ -82,7 +82,7 @@ int cyber_train(Model *m, const char *dataset, int steps, float lr, float replay
   if(nlines>=200) break;
  }
  fclose(f);
- if(!nlines){ fprintf(stderr,"cyber: dataset vacio\n"); return -1; }
+ if(!nlines){ fprintf(stderr,"cyber: empty dataset\n"); return -1; }
  fprintf(stderr,"cyber: %d samples (cap 200) DoRA+GaLore+MoE cosine\n", nlines); fflush(stderr);
  double best_loss = compute_loss(m, lines[0]);
  fprintf(stderr,"cyber: init loss=%.3f\n", best_loss); fflush(stderr);
@@ -119,7 +119,7 @@ int cyber_train(Model *m, const char *dataset, int steps, float lr, float replay
   }
  }
  for(int i=0;i<nlines;i++) free(lines[i]); free(lines);
- fprintf(stderr,"cyber: REAL done best_loss=%.3f SecEval 42→71%%\n", best_loss); fflush(stderr);
+ fprintf(stderr,"cyber: REAL done best_loss=%.3f SecEval 42â†’71%%\n", best_loss); fflush(stderr);
  return 0;
 }
 int cyber_save_lora(Model *m, const char *path){
@@ -133,7 +133,7 @@ int cyber_save_lora(Model *m, const char *path){
   fwrite(m->loraA_gate[l],4,(size_t)dim*r,f); fwrite(m->loraB_gate[l],4,(size_t)r*hid,f);
   fwrite(m->loraM_q[l],4,(size_t)nq,f); fwrite(m->loraM_v[l],4,(size_t)nkv,f); fwrite(m->loraM_gate[l],4,(size_t)hid,f);
  }
- fclose(f); fprintf(stderr,"cyber: guardado v2 %s r=%d\n",path,m->lora_r); return 0;
+ fclose(f); fprintf(stderr,"cyber: saved v2 %s r=%d\n",path,m->lora_r); return 0;
 }
 int cyber_load_lora(Model *m, const char *path){
  FILE *f=fopen(path,"rb"); if(!f) return -1;
@@ -159,19 +159,19 @@ int cyber_load_lora(Model *m, const char *path){
    fread(m->loraM_q[l],4,(size_t)nq,f); fread(m->loraM_v[l],4,(size_t)nkv,f); fread(m->loraM_gate[l],4,(size_t)hid,f);
   }
  }
- fclose(f); fprintf(stderr,"cyber: cargado v%d %s r=%d\n",ver,path,r); return 0;
+ fclose(f); fprintf(stderr,"cyber: loaded v%d %s r=%d\n",ver,path,r); return 0;
 }
 int cyber_train_particle(Model *m, const char *dataset, int steps, float temp_c){
  // v7 perfect r=128
  int r_wanted = 32; if(steps>=20000) r_wanted=128; else if(steps>=10000) r_wanted=96; else if(steps>=5000) r_wanted=64;
- fprintf(stderr,"particle-sousvide v6 r=%d PT 4x Levy curriculum: %.1f°C steps=%d\n", r_wanted, temp_c, steps); fflush(stderr);
+ fprintf(stderr,"particle-sousvide v6 r=%d PT 4x Levy curriculum: %.1fÂ°C steps=%d\n", r_wanted, temp_c, steps); fflush(stderr);
  if(lora_alloc(m,r_wanted)) return -1;
  // init particle velocities in galore_m
  for(int L=0; L<m->c.n_layers; L++) for(int i=0;i<m->lora_r*m->c.hidden_dim;i++) m->galore_m[L][i]= ((float)rand()/RAND_MAX-0.5f)*0.01f;
  // load dataset (cap 50000 for full rdru200m)
  FILE *f=fopen(dataset,"rb"); char **lines=NULL; int nlines=0, cap=0; char line[8192];
  if(f){ while(fgets(line,sizeof line,f)){ char *p=strstr(line,"\"text\""); if(p){ p=strchr(p,':'); if(p){ p++; while(*p==' '||*p=='\"') p++; char *e=strrchr(p,'\"'); if(e) *e=0; } } else p=line; size_t L=strlen(p); while(L>0 && (p[L-1]=='\n'||p[L-1]=='\r')) p[--L]=0; if(!*p) continue; if(nlines>=cap){ cap=cap?cap*2:256; char **tmp=realloc(lines,cap*sizeof(char*)); if(!tmp) break; lines=tmp; } lines[nlines++]=strdup(p); if(nlines>=50000) break; } fclose(f); }
- if(!nlines){ fprintf(stderr,"particle: dataset vacio\n"); return -1; }
+ if(!nlines){ fprintf(stderr,"particle: empty dataset\n"); return -1; }
  double best=compute_loss(m, lines[0]);
  fprintf(stderr,"particle: init loss=%.3f\n", best); fflush(stderr);
  double curriculum_best = best;
