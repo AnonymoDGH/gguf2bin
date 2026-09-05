@@ -1,6 +1,7 @@
-/* g2b.h — gguf2bin2: formato propio G2BX + runtime optimizado (Qwen3/Llama) v4.7 */
+/* g2b.h — gguf2bin2: formato propio G2BX + runtime optimizado (Qwen3/Llama) (ver version.h) */
 #ifndef G2B_H
 #define G2B_H
+#include "version.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>

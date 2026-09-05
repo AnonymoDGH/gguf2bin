@@ -134,7 +134,7 @@ int gguf_load(const char *path, GGUF *g){
     char *key=(char*)p; p+=klen;
     if(!bounds(p,end,4)){ fprintf(stderr,"gguf: truncated metadata\n"); gguf_free(g); return -1; }
     u32 vt=ru32(p); p+=4;
-    if(klen==16 && !memcmp(key,"general.alignment",16)){
+    if(klen==17 && !memcmp(key,"general.alignment",17)){
       if(bounds(p,end,meta_adv(vt)))
         g->alignment=(u64)meta_i(p,vt);
     }

@@ -1,5 +1,7 @@
-# gguf2bin2 — G2BX runtime (C99) — v4.7
+# gguf2bin2 — G2BX runtime (C99) — version en include/version.h
 CC      ?= gcc
+# -Iinclude primero: usa los headers Vulkan vendoreados del repo;
+# Vulkan-Headers-1.3.290/ (ignorado en git) solo como override local si existe.
 CFLAGS  ?= -O3 -mavx2 -mfma -mf16c -ffast-math -fopenmp -std=c99 -Wall -Wextra -Iinclude -IVulkan-Headers-1.3.290/include
 LDFLAGS ?= -lm -fopenmp
 

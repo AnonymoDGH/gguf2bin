@@ -18,6 +18,8 @@
 
 #define G2BX_MAGIC "G2BX"
 #define ALIGN64(x) (((x)+63ull)&~63ull)
+/* tope de los arrays beta_v/g_v/dtb/av del forward híbrido (stack) */
+#define HY_NV_MAX 256
 #if defined(_OPENMP)
 #include <omp.h>
 #define L5_TLS_MAX 128
@@ -576,6 +578,19 @@ static int load_header_body(FILE *f, Model *m, const char *path){
     m->no_kv_q8=1; /* el slice por head no cae en bloque Q8 */
     fprintf(stderr,"model: head_dim=%d not a multiple of 32 - forcing F32 KV cache\n",m->c.head_dim);
   }
+  if(m->arch==ARCH_QWEN35 && m->c.fa_interval>0){
+    /* los arrays beta_v/g_v/dtb/av del forward son f32[HY_NV_MAX] en stack */
+    if(m->c.ssm_dt_rank>HY_NV_MAX || m->c.ssm_dt_rank<=0){
+      fprintf(stderr,"model: qwen35 ssm_dt_rank=%d fuera de rango [1..%d]\n",
+        m->c.ssm_dt_rank,HY_NV_MAX);
+      return -1;
+    }
+    if(m->c.ssm_inner % m->c.ssm_dt_rank){
+      fprintf(stderr,"model: qwen35 ssm_inner=%d no divisible por dt_rank=%d\n",
+        m->c.ssm_inner,m->c.ssm_dt_rank);
+      return -1;
+    }
+  }
 
   build_index(m);
   if(model_set_ctx(m, m->c.seq_len)){
@@ -765,10 +780,6 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
         #pragma omp parallel if(ngrp>=2 && pos>=16)
 #endif
         {
-#if defined(_OPENMP)
-          #pragma omp parallel if(ngrp>=2 && pos>=16)
-#endif
-          {
             tls_kv_ensure(hd);
             f32 *kr=tls_krow; f32 *vr=tls_vrow;
             if(!kr||!vr){
@@ -794,7 +805,6 @@ static void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_log
               for(i32 h=h0;h<h1;h++)
                 fma_hd(q+(size_t)h*hd,vr,att[(size_t)h*ctx+t],hd);
             }
-          }
           }
         }
       }
@@ -893,7 +903,8 @@ static inline void mv_update(Model *m, i32 token, int hit){
   m->mv_seq++;
 }
 static inline int mv_tunable_skip(Model *m, i32 L, i32 pos, i32 token){
-  if(getenv("G2BX_MV_DISABLE")) return 0;
+  static i8 mv_off=-1; if(mv_off==-1){ mv_off=getenv("G2BX_MV_DISABLE")?1:0; }
+  if(mv_off) return 0;
   float r = m->mv_ratio;
   if(r <= 0.001f) return 0;
   if(pos < 4) return 0;
@@ -905,8 +916,8 @@ static inline int mv_tunable_skip(Model *m, i32 L, i32 pos, i32 token){
 }
 
 /* ── qwen35: gated delta net + atención completa cada N capas (CPU secuencial) ──
-   Ref: llama.cpp src/models/qwen35.cpp + ggml_gated_delta_net (ops.cpp). */
-#define HY_NV_MAX 256
+   Ref: llama.cpp src/models/qwen35.cpp + ggml_gated_delta_net (ops.cpp).
+   (HY_NV_MAX se define arriba: lo usa también la validación de geometría en carga) */
 static inline float softplusf(float x){
   if(x>20.f) return x;
   return logf(1.f+expf(x));
@@ -940,7 +951,8 @@ static int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_lo
   if(ctx<=0) ctx=c->seq_len;
   if(pos<0||pos>=ctx||token<0||token>=c->vocab) return -1;
   if(!m->buf||!m->ssm_st||!m->conv_state){ fprintf(stderr,"fwd: runtime not initialized\n"); return -1; }
-  int _dbg_hyb = getenv("G2BX_DBG")!=NULL;
+  static i8 dbg_hyb=-1; if(dbg_hyb==-1){ dbg_hyb=getenv("G2BX_DBG")?1:0; }
+  int _dbg_hyb = dbg_hyb;
   if(_dbg_hyb && pos<2) fprintf(stderr,"[C] forward_hybrid token %d pos %d dim %d\n", token, pos, dim);
 
   f32 *B=m->buf;

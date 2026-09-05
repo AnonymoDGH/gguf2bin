@@ -15,6 +15,7 @@ static HMODULE g_dll;
 static void *g_dll;
 #endif
 #include "g2b.h"
+#include "../shaders/shaders_emb.h"
 
 static void vk_log(const char *fmt, ...){
   FILE *L=fopen("vk.log","a");
@@ -78,7 +79,12 @@ static void head_free(void);
 int vk_init(void){
 #ifdef _WIN32
   vk_log("A: entrada\n");
-  if(!getenv("VK_G2B_ALLOW_AMD") && !getenv("VK_LOADER_DRIVERS_DISABLE")) _putenv("VK_LOADER_DRIVERS_DISABLE=*amd*");
+  /* B12: el disable de AMD por defecto es deliberado (su driver 2022 cuelga
+     vkCreateInstance en esta máquina - ver ROADMAP_PERF.md), pero nunca silencioso */
+  if(!getenv("VK_G2B_ALLOW_AMD") && !getenv("VK_LOADER_DRIVERS_DISABLE")){
+    fprintf(stderr,"vk: deshabilitando driver AMD por defecto (su ICD 2022 cuelga la enumeración); use VK_G2B_ALLOW_AMD=1 para incluirlo\n");
+    _putenv("VK_LOADER_DRIVERS_DISABLE=*amd*");
+  }
   /* Bypass del loader: este sistema no tiene HKLM\Khronos\Vulkan\Drivers y la
      enumeracion del loader crashea. Cargamos el ICD del DriverStore DIRECTAMENTE. */
   g_dll=NULL;
@@ -317,11 +323,14 @@ int vk_head_upload_q40(const u8 *weights, i32 n, i32 rows){
   g_head_ok=1; return 0;
 }
 
-static int head_pipeline_spv(const char *spv_path);
+static int head_pipeline_spv(const char *spv_path, const uint32_t *emb, size_t emb_sz);
+static int head_pipeline_emb(const char *name, const uint32_t *emb, size_t emb_sz){
+  return head_pipeline_spv(name, emb, emb_sz);
+}
 
-int vk_head_pipeline(void){ return head_pipeline_spv("shaders/q4_gemv.spv"); }
+int vk_head_pipeline(void){ return head_pipeline_spv("shaders/q4_gemv.spv", spv_q4_gemv, spv_q4_gemv_len); }
 
-static int head_pipeline_spv(const char *spv_path){
+static int head_pipeline_spv(const char *spv_path, const uint32_t *emb, size_t emb_sz){
   if(!g_head_ok||!g_dev) return -1;
   if(g_pipe_ok) return 0;
   GETD(vkCreateShaderModule); GETD(vkCreateDescriptorSetLayout); GETD(vkCreatePipelineLayout);
@@ -330,13 +339,26 @@ static int head_pipeline_spv(const char *spv_path){
   GETD(vkResetCommandPool); GETD(vkBeginCommandBuffer); GETD(vkCmdBindPipeline);
   GETD(vkCmdBindDescriptorSets); GETD(vkCmdPushConstants); GETD(vkCmdDispatch);
   GETD(vkEndCommandBuffer); GETD(vkQueueSubmit); GETD(vkQueueWaitIdle);
+  /* A37: el archivo manda si existe (flujo actual); si no, bytes embebidos
+     (binario distribuido fuera del repo) */
+  uint32_t *code=NULL; size_t sz=0; int from_emb=0;
   FILE *f=fopen(spv_path,"rb");
-  if(!f){ fprintf(stderr,"vkhead: missing %s\n",spv_path); return -1; }
-  fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
-  if(sz<=0||sz%4){ fprintf(stderr,"vkhead: invalid spv size (%ld)\n",sz); fclose(f); return -1; }
-  uint32_t *code=malloc((size_t)sz);
-  if(fread(code,1,(size_t)sz,f)!=(size_t)sz){ fclose(f); free(code); return -1; }
-  fclose(f);
+  if(f){
+    fseek(f,0,SEEK_END); long fsz=ftell(f); fseek(f,0,SEEK_SET);
+    if(fsz>0&&!(fsz%4)){
+      code=malloc((size_t)fsz);
+      if(code && fread(code,1,(size_t)fsz,f)==(size_t)fsz) sz=(size_t)fsz;
+      else { free(code); code=NULL; }
+    }
+    fclose(f);
+  }
+  if(!code && emb && emb_sz){
+    code=malloc(emb_sz);
+    if(code){ memcpy(code,emb,emb_sz); sz=emb_sz; from_emb=1; }
+  }
+  if(!code){ fprintf(stderr,"vkhead: missing %s (y sin embebido)\n",spv_path); return -1; }
+  if(sz%4){ fprintf(stderr,"vkhead: invalid spv size (%lu)\n",(unsigned long)sz); free(code); return -1; }
+  if(from_emb) fprintf(stderr,"vkhead: usando shader embebido (%s)\n",spv_path);
   VkShaderModuleCreateInfo sm={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,VK_NULL_HANDLE,0,(size_t)sz,code};
   VkShaderModule mod;
   int rc=p_vkCreateShaderModule(g_dev,&sm,VK_NULL_HANDLE,&mod); free(code);
@@ -426,10 +448,10 @@ int vk_worker_main(int argc,char **argv){
   int rc;
   if(wtype==T_Q4_0S){
     rc=vk_head_upload(w,n,rows);                        /* layout Q4_0S: 33 u32/sb */
-    if(!rc) rc=head_pipeline_spv("shaders/q40s_gemv.spv");
+    if(!rc) rc=head_pipeline_spv("shaders/q40s_gemv.spv", spv_q40s_gemv, spv_q40s_gemv_len);
   } else {
     rc=vk_head_upload_q40(w,n,rows);                    /* layout Q4_0: 17 u32/bloque */
-    if(!rc) rc=head_pipeline_spv("shaders/q40_gemv.spv");
+    if(!rc) rc=head_pipeline_spv("shaders/q40_gemv.spv", spv_q40_gemv, spv_q40_gemv_len);
   }
   free(w);
   if(rc) return 6;

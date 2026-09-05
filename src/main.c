@@ -1,5 +1,6 @@
-/* CLI: pack | info | run | synth | chat | bench — runtime G2BX v4.7 */
+/* CLI: pack | info | run | synth | chat | bench — runtime G2BX */
 #include "g2b.h"
+#include "version.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -80,7 +81,7 @@ static int recent_snapshot(const RecentBuf *r, i32 *out, int maxn){
 
 static void usage(const char *a0){
   fprintf(stderr,
-    "gguf2bin2 - GGUF -> G2BX (own format) -> Qwen3/Llama/LFM2 inference v4.9\n\n"
+    "gguf2bin2 - GGUF -> G2BX (own format) -> Qwen3/Llama/LFM2 inference v" G2B_VERSION "\n\n"
     "  %s pack   <model.gguf> <out.g2bx> [--q4] [--prune F]\n"
     "                     --prune 0.5  prune 50%% of the FFN by importance\n"
     "                     (MoE effect: fewer weights/token -> more tok/s)\n"
@@ -157,7 +158,12 @@ static int cmd_pack(int argc, char **argv){
   char *text=NULL; size_t len=0,cap=0;
   if(calib_file){
     FILE *f=fopen(calib_file,"rb");
-    if(f){ char buf[16384]; size_t r; while((r=fread(buf,1,sizeof buf,f))>0){ text=realloc(text,len+r+1); memcpy(text+len,buf,r); len+=r; } fclose(f); }
+    if(f){ char buf[16384]; size_t r;
+      while((r=fread(buf,1,sizeof buf,f))>0){
+        char *nt=realloc(text,len+r+1);
+        if(!nt){ fprintf(stderr,"pack: OOM reading calib\n"); free(text); fclose(f); model_free(&m); remove(tmp); return 1; }
+        text=nt; memcpy(text+len,buf,r); len+=r;
+      } fclose(f); }
     else fprintf(stderr,"pack: cannot open %s - using embedded corpus\n",calib_file);
   }
   if(!text || len==0){ text=(char*)DEFAULT_CALIB; len=strlen(DEFAULT_CALIB); }
@@ -421,7 +427,6 @@ static int cmd_run(int argc, char **argv){
   if(mv_ratio>0) m.mv_ratio=mv_ratio;
   if(cyber) cyber_load_lora(&m,cyber);
   if(bvh_ratio>0){ m.use_bvh=1; m.bvh_keep=bvh_ratio; fprintf(stderr,"[bvh] sparse %.2f\n",bvh_ratio); }
-  if(cyber) cyber_load_lora(&m,cyber);
   if(gpu && !vk_dual_start(&m,path)) fprintf(stderr,"[gpu] continuing CPU-only\n");
   { const char *sw = fast ? NULL : swap;
     if(apply_ram_opts(&m,ctx,max_ram,q8kv,f32kv,sw)){ model_free(&m); return 1; } }
