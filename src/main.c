@@ -1,6 +1,6 @@
 /* CLI sobre la API pública (include/gguf2bin.h).
- * Solo los comandos experimentales/harness (cyber-*, ppl usa g2b_ppl) tocan
- * internals directamente; run/chat/bench/info/pack/vkinfo van por sesiones. */
+ * run/chat/bench/info/pack/vkinfo van por sesiones; ppl usa g2b_ppl.
+ * LoRA inference (--cyber <f.lora>) carga pesos reales vía cyber_load_lora. */
 #include "gguf2bin.h"
 #include "internal/g2b.h"
 #include "internal/g2bx_io.h"
@@ -8,30 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
-/* cyber-*: acceso directo a Model (experimental; Fase 7 lo re-etiquetará).
- * Único usuario restante de carga cruda en la CLI. */
-static int load_any(const char *path, Model *m){
-  size_t n=strlen(path);
-  int g2bx=(n>=5 && (!strcmp(path+n-5,".g2bx")||!strcmp(path+n-5,".G2BX")||!strcmp(path+n-5,".gbin")));
-  if(g2bx) return model_load_g2bx(path,m);
-  return model_load_gguf(path,m);
-}
-
 /* Construye g2b_config desde los flags comunes run/chat/bench/ppl. */
 static void fill_cfg(g2b_config *c, i32 ctx, int nthr, int q8kv, int f32kv,
                      u64 max_ram_mb, const char *swap, int fast,
-                     float mv_ratio, int gpu, const char *lora, u64 seed){
+                     int gpu, const char *lora, u64 seed){
   memset(c,0,sizeof *c);
   c->ctx=ctx; c->threads=nthr;
   c->q8_kv = f32kv?0:(q8kv?1:-1);
   c->max_ram_bytes=max_ram_mb<<20;
   c->swap_path=swap; c->fast=fast;
-  c->mv_ratio=mv_ratio; c->gpu=gpu; c->lora_path=lora; c->seed=seed;
+  c->gpu=gpu; c->lora_path=lora; c->seed=seed;
 }
 
 static void run_print_tok(const char *piece, void *ud){
@@ -68,8 +58,7 @@ static void usage(const char *a0){
     "      --swap [PATH]      file-backed KV cache; without PATH uses D:\\ if present, else system temp\n"
     "      --fast             everything out: high priority, max threads, no swap\n"
     "      --threads N        OpenMP core count (default: all)\n"
-    "      --drop N           skip the N least-influential blocks (ShortGPT)\n"
-    "      --mv F             Swapeculative 0.0..1.0 FFN/SSM skip\n\n"
+     "      --drop N           skip the N least-influential blocks (ShortGPT)\n\n"
     "bench extras:\n"
     "      --prefill N        measure prompt-processing tok/s (no logits)\n\n"
     "Examples:\n"
@@ -114,7 +103,7 @@ static int cmd_run(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   i32 n_tok=64; f32 temp=0.7f; int top_k=40; float top_p=0.9f; float rep_pen=1.1f; int use_bos=0;
-  float bvh_ratio=0.f; const char *cyber=NULL;
+  const char *cyber=NULL;
   OptsCommon co; opts_common_init(&co);
   i32 prompt[1024]; i32 np=0;
   char text[8192]; text[0]=0;
@@ -126,7 +115,6 @@ static int cmd_run(int argc, char **argv){
     else if(!strcmp(argv[i],"--top-p")&&i+1<argc) top_p=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--repeat-penalty")&&i+1<argc) rep_pen=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--bos")) use_bos=1;
-    else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-' && strchr(argv[i+1],'.')) bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
     else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
     else if(!strcmp(argv[i],"--tokens")&&i+1<argc){
       char *s=argv[++i], *tok;
@@ -137,8 +125,7 @@ static int cmd_run(int argc, char **argv){
     }
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,cyber,co.seed);
-  cfg.bvh_keep=bvh_ratio;
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,cyber,co.seed);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"run: cannot open %s\n",path); return 1; }
   if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
@@ -178,18 +165,16 @@ static int cmd_ppl(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   const char *path=argv[2];
   const char *file=NULL; i32 maxtok=4096;
-  float bvh_ratio=0.f; const char *cyber=NULL;
+  const char *cyber=NULL;
   OptsCommon co; opts_common_init(&co);
   for(int i=3;i<argc;i++){
     if(opts_common_try(&co,argc,argv,&i)) continue;
     if(!strcmp(argv[i],"-f")&&i+1<argc) file=argv[++i];
     else if(!strcmp(argv[i],"-n")&&i+1<argc) maxtok=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"--bvh")){ if(i+1<argc && argv[i+1][0]!='-') bvh_ratio=(float)atof(argv[++i]); else bvh_ratio=0.15f; }
     else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,0,co.mv_ratio,0,cyber,0);
-  cfg.bvh_keep=bvh_ratio;
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,0,0,cyber,0);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"ppl: cannot open %s\n",path); return 1; }
   if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
@@ -228,7 +213,6 @@ static int cmd_chat(int argc, char **argv){
   int no_think=1; int show_think=0;
   const char *sys_txt="You are a helpful assistant.";
   int no_sys=0;
-  float bvh_ratio=0.f;
   OptsCommon co; opts_common_init(&co);
   for(int i=3;i<argc;i++){
     if(opts_common_try(&co,argc,argv,&i)) continue;
@@ -243,8 +227,7 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--no-system")){ no_sys=1; sys_txt=NULL; }
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,NULL,co.seed);
-  cfg.bvh_keep=bvh_ratio;
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,co.seed);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"chat: cannot open %s\n",path); return 1; }
   if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
@@ -280,7 +263,6 @@ static int cmd_chat(int argc, char **argv){
 static int cmd_bench(int argc, char **argv){
   if(argc<3){ usage(argv[0]); return 1; }
   i32 n=32;
-  float bvh_ratio=0.f;
   OptsCommon co; opts_common_init(&co);
   i32 prefill_n=0; int json=0;
   for(int i=3;i<argc;i++){
@@ -290,8 +272,7 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--json")) json=1;
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.mv_ratio,co.gpu,NULL,0);
-  cfg.bvh_keep=bvh_ratio;
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,0);
   g2b_session *s=NULL;
   if(g2b_open(argv[2],&cfg,&s)!=G2B_OK){ fprintf(stderr,"bench: cannot open %s\n",argv[2]); return 1; }
   if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
@@ -315,33 +296,6 @@ static int cmd_bench(int argc, char **argv){
   g2b_close(s); return 0;
 }
 
-static int cmd_cyber(int argc, char **argv){
- fprintf(stderr,"[cyber] cmd enter\n");
-  if(argc<4){ fprintf(stderr,"usage: %s cyber-train <model.g2bx> <dataset.jsonl> [-o lora.bin] [--steps N] [--lr F] [--replay F] [--particle] [--temp F]\n", argv[0]); return 1; }
- const char *model=argv[2], *data=argv[3]; const char *out="cyber_mrna.lora"; int steps=200; float lr=1e-4f, replay=0.2f; int use_particle=0; float temp=54.4f;
- for(int i=4;i<argc;i++){ if(!strcmp(argv[i],"-o")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--steps")&&i+1<argc) steps=atoi(argv[++i]); else if(!strcmp(argv[i],"--lr")&&i+1<argc) lr=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--replay")&&i+1<argc) replay=(float)atof(argv[++i]); else if(!strcmp(argv[i],"--particle")) use_particle=1; else if(!strcmp(argv[i],"--temp")&&i+1<argc) temp=(float)atof(argv[++i]); }
- fprintf(stderr,"[cyber] load %s\n", model);
-  Model m; if(load_any(model,&m)){ fprintf(stderr,"[cyber] load failed\n"); return 1; }
- fprintf(stderr,"[cyber] loaded dim=%d L=%d\n", m.c.dim, m.c.n_layers);
- int rc= use_particle? cyber_train_particle(&m,data,steps,temp) : cyber_train(&m,data,steps,lr,replay);
- if(!rc) rc=cyber_save_lora(&m,out);
- model_free(&m); return rc?1:0;
-}
-static int cmd_cyber_pack(int argc, char **argv){
-  if(argc<5){ fprintf(stderr,"usage: %s cyber-pack <base.g2bx> <lora.bin> <out.g2bx>\n", argv[0]); return 1; }
- return cyber_pack_merge(argv[2],argv[3],argv[4])?1:0;
-}
-static int cmd_bench_cyber(int argc, char **argv){
-  if(argc<3){ fprintf(stderr,"usage: %s bench-cyber <model> [--cyber lora.bin]\n", argv[0]); return 1; }
- const char *lora=NULL; for(int i=3;i<argc;i++) if(!strcmp(argv[i],"--cyber")&&i+1<argc) lora=argv[++i];
- Model m; if(load_any(argv[2],&m)) return 1;
- if(lora) cyber_load_lora(&m,lora);
- // mini SecEval
- const char *qs[]={"What is XSS?","What is SQL injection?","CVE buffer overflow?","Explain RCE","What is CSRF?"};
-   int ok=0; for(int i=0;i<5;i++){ i32 *ids=NULL; int n=tok_encode(m.tok, qs[i], &ids); (void)n; f32 *lg=calloc(m.c.vocab,4); model_forward_ex(&m, ids[0],0,lg,1); int top=0; float mx=lg[0]; for(int j=1;j<m.c.vocab;j++) if(lg[j]>mx){ mx=lg[j]; top=j; } char *dec=tok_decode(m.tok,&top,1); printf("Q: %s -> %s\n",qs[i],dec); free(dec); free(lg); free(ids); if(m.lora_r) ok++; }
- printf("cyber bench: lora=%s score %d/5\n", lora?"yes":"no", lora?4:1);
- model_free(&m); return 0;
-}
 int main(int argc, char **argv){
 #if defined(_WIN32)
   SetConsoleOutputCP(65001);
@@ -349,6 +303,15 @@ int main(int argc, char **argv){
 #endif
   fprintf(stderr,"[main] start\n");
   if(argc<2){ usage(argv[0]); return 1; }
+  if(!strcmp(argv[1],"run") || !strcmp(argv[1],"chat") ||
+     !strcmp(argv[1],"ppl") || !strcmp(argv[1],"bench")){
+    for(int i=3;i<argc;i++){
+      if(!strcmp(argv[i],"--mv") || !strcmp(argv[i],"--bvh")){
+        fprintf(stderr,"%s was removed in v5.1; see docs/ROADMAP_PERF.md\n",argv[i]);
+        return 1;
+      }
+    }
+  }
   if(!strcmp(argv[1],"--gpu-worker")) return vk_worker_main(argc,argv);
   if(!strcmp(argv[1],"pack"))  return cmd_pack(argc,argv);
   if(!strcmp(argv[1],"info"))  return cmd_info(argc,argv);
@@ -357,9 +320,6 @@ int main(int argc, char **argv){
   if(!strcmp(argv[1],"bench")) return cmd_bench(argc,argv);
   if(!strcmp(argv[1],"chat"))  return cmd_chat(argc,argv);
   if(!strcmp(argv[1],"ppl"))   return cmd_ppl(argc,argv);
-  if(!strcmp(argv[1],"cyber-train")) return cmd_cyber(argc,argv);
-  if(!strcmp(argv[1],"cyber-pack")) return cmd_cyber_pack(argc,argv);
-  if(!strcmp(argv[1],"bench-cyber")) return cmd_bench_cyber(argc,argv);
   if(!strcmp(argv[1],"vkinfo")){
     char rep[512]; g2b_error e=g2b_vk_probe(rep,sizeof rep);
     printf("%s\n",rep); return e?1:0;

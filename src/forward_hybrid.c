@@ -192,10 +192,6 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
         fprintf(stderr,"[C] q0 %g k0 %g v0 %g dot %g\n", qkv[0], qkv[kdim], qkv[2*kdim], dot);
       }
       { /* recurrencia delta rule por v-head; out → wqo (libre aquí) */
-        int mv_skip = 0;
-        if(mv_tunable_skip(m, L, pos, token)){
-          mv_skip=1; m->mv_skips++;
-        }
         f32 *o=gdno; /* reuso: activado qkv ya consumido al final del bucle */
         const f32 *qc=qkv, *kc=qkv+kdim, *vc=qkv+2*kdim;
         const f32 sc=1.f/sqrtf((f32)dv);
@@ -205,17 +201,6 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
           const f32 *vh=vc+(size_t)h*dv;
           f32 *S=m->ssm_st+((size_t)recL*nv+(size_t)h)*(size_t)dv*(size_t)dv;
           f32 dec=expf(g_v[h]);
-          if(mv_skip){
-            // Swapeculative: solo decay + output, salta delta update (2/3 del costo)
-            for(i32 j=0;j<dv;j++){ f32 *sr=S+(size_t)j*dv; for(i32 i=0;i<dv;i++) sr[i]*=dec; }
-            f32 *oh=o+(size_t)h*dv;
-            for(i32 j=0;j<dv;j++){
-              const f32 *sr=S+(size_t)j*dv; f32 sum=0;
-              for(i32 i=0;i<dv;i++) sum+=sr[i]*qh[i];
-              oh[j]=sum*sc;
-            }
-            continue;
-          }
           f32 delta[512];
           if((i32)dv>512){ fprintf(stderr,"fwd hybrid: dv=%d >512\n",dv); return -1; }
           for(i32 j=0;j<dv;j++){ f32 *sr=S+(size_t)j*dv; for(i32 i=0;i<dv;i++) sr[i]*=dec; }
@@ -274,13 +259,6 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
 
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
-  if(m->mv_table){
-    // Swapeculative: entrena predictor con token actual (hit si ya visto)
-    u32 h=mv_hash(token);
-    int seen = (m->mv_table[h].token==token);
-    mv_update(m, token, seen?1:0);
-    if(seen) {} else { /* first time miss counted in mv_update */ }
-  }
   if(!want_logits||!logits) return 0;
   Slot *out=slot_get(m,R_OUTPUT,-1);
   if(!out) out=emb;

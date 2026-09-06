@@ -12,7 +12,6 @@ typedef struct {
   int ctx, threads, q8kv, f32kv, fast, ndrop, gpu;
   uint64_t max_ram_mb;   /* MB (fill_cfg la pasa a bytes) */
   uint64_t seed;
-  float mv_ratio;
   const char *swap;      /* "@" = ruta por defecto del sistema */
 } OptsCommon;
 

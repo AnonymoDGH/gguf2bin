@@ -102,6 +102,36 @@ el decode está limitado por BYTES, no por ALU. Todo lo que añada tráfico
   ya existen con su tradeoff). R6 exige antes un harness de bench en ctx
   largo (el bench actual cicla pos<32) + validación de calidad.
 
+## Fase 7 (2026-09-05): veredictos §17 ejecutados — el experimento que se mide, se jubila
+- **17.1 CYBER-mRNA** → `experimental/cyber-mrna/` (opción b): el archivo
+  histórico adaptado + README que dice lo que era de verdad (búsqueda
+  estocástica de perturbación, NO gradiente; curva sintética en --particle;
+  nombres DoRA/GaLore/MoE/SecEval = marketing). Lo que era REAL (alloc/
+  apply/save/load LoRA) vive en `src/l8_lora.c`. `cyber-train`, `cyber-pack`,
+  `bench-cyber` (score constante 4/1) eliminados de la CLI. `--cyber <lora>`
+  se conserva: carga adaptadores v1/v2 reales.
+- **17.2 MV + 17.3 BVH** → **retirados**, no avisados. ppl base 25.4 →
+  `--mv 0.1` 35 629 (×1400), `--mv 0.3` 61 985, `--mv 0.5` 352 904;
+  `--bvh` 19 966 (×786) en las pruebas 0.1/0.3/0.5. Aunque keep cambia
+  la máscara al cruzar 0.2, los resultados redondeados fueron iguales;
+  no se aisló la causa. Se elimina mv_table/bvh_*/hitrate de Model/API/CLI.
+  El hitrate contaba repetición de tokens, no aciertos de predicción;
+  las primeras apariciones no incrementaban misses.
+- **17.4/17.5 OrderBook/HDR/ZRAM/FM-index/rope_th** → eliminados (código
+  muerto verificado; fm_build era O(n²) y `fm_contains` nunca se llamó).
+- **17.6 formatos propios** → ppl medido (corpus: README+README.es+SPEC,
+  1024 tok, procesos separados): Q4_0 25.4 | Q8_0 20.8 (qwen3-0.6B);
+  lfm2-1.2B: q4max 28.1 vs q4s 34.9. Llama: baseline 83.966 vs VVC
+  1177.176 (256 tokens); baseline 82.325 vs PSY 2380555.838 (128 tokens).
+  Son pruebas locales cortas de los archivos disponibles, no una evaluación
+  general del formato. PSY/VVC siguen soportados, pero desaconsejados;
+  falta aislar la causa de la degradación y verificar la procedencia del baseline.
+- Nota método: PowerShell `>` produce UTF-16LE con BOM; el tokenizador
+  encuentra un NUL y trunca el texto. Se descartaron esas pruebas y se usaron
+  bytes UTF-8. El corpus temporal y los logs se borraron al limpiar: los
+  números anteriores quedan como observaciones de sesión, no evidencia
+  reproducible archivada. Los README posteriores ya no son el mismo corpus.
+
 ## Fase 6 (2026-09-05): unificación parcial — la plantilla total, rechazada
 - Hecho: tabla de dispatch única (`qmat_lookup`: 11 tipos; B2 fixed — `rows`
   ya no deja `out` sin escribir; eliminada línea duplicada T_Q4_0S) +

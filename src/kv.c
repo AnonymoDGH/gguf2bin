@@ -108,8 +108,6 @@ void free_rt(Model *m){
   free(m->ffn_stats); m->ffn_stats=NULL;
   free(m->conv_state); m->conv_state=NULL;
   free(m->ssm_st); m->ssm_st=NULL;
-  /* mv_table persiste entre ctx switches para conservar historia predictiva */
-  // no free mv_table aquí — se libera en model_free
   if(m->use_swap && m->swapmap.view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
@@ -181,14 +179,6 @@ int alloc_rt(Model *m, i32 ctx){
     m->ssm_st=calloc(ns,sizeof(f32));
     m->conv_state=calloc(nc,sizeof(f32));
     if(!m->ssm_st||!m->conv_state){ free_rt(m); return -1; }
-  }
-  /* Swapeculative MV table */
-  if(!m->mv_table){
-    m->mv_table=calloc(MV_TABLE_SIZE, sizeof(*m->mv_table));
-    if(!m->mv_table){ free_rt(m); return -1; }
-    for(int i=0;i<MV_TABLE_SIZE;i++){ m->mv_table[i].token=-1; m->mv_table[i].pred=1; }
-    m->mv_seq=0; m->mv_hits=m->mv_misses=m->mv_skips=0;
-    // mv_ratio ya viene de CLI, default 0 si no se setea
   }
   return 0;
 }

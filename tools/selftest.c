@@ -272,7 +272,7 @@ static void t_dispatch(void){
 static void t_opts(void){  OptsCommon o; opts_common_init(&o);
   char *av[]={"prog","-c","512","--threads","4","--q8-kv","--fast",
               "--max-ram","2048","--swap","--seed","7","--drop","2",
-              "--mv","0.5","--gpu","--f32-kv","--ctx","1024","zzz"};
+              "--gpu","--f32-kv","--ctx","1024","zzz"};
   int ac=(int)(sizeof av/sizeof av[0]);
   for(int i=1;i<ac;i++){
     int k=i;
@@ -287,8 +287,11 @@ static void t_opts(void){  OptsCommon o; opts_common_init(&o);
   CHECK(o.swap && !strcmp(o.swap,"@"),"swap @");
   CHECK(o.seed==7,"seed");
   CHECK(o.ndrop==2,"drop");
-  CHECK(o.mv_ratio>0.49f && o.mv_ratio<0.51f,"mv");
   CHECK(o.gpu==1,"gpu");
+  /* Phase 7: the common parser no longer consumes --mv. */
+  { OptsCommon o4; opts_common_init(&o4);
+    char *av4[]={"p","--mv","0.5"}; int i4=1;
+    CHECK(opts_common_try(&o4,3,av4,&i4)==0 && i4==1,"mv retirado"); }
   /* --swap con path */
   OptsCommon o2; opts_common_init(&o2);
   char *av2[]={"p","--swap","D:\\x.swap"};

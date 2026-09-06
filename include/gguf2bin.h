@@ -48,8 +48,7 @@ typedef struct {
   uint64_t max_ram_bytes;   /* 0 = sin límite (auto-Q8 + shrink ctx hasta encajar) */
   const char *swap_path;    /* NULL = KV en RAM; "@" = ruta por defecto del sistema */
   int      fast;            /* 1 = prioridad alta + todos los hilos, sin swap */
-  float    mv_ratio;        /* 0 = off; 0.0..1.0 skip especulativo FFN/SSM */
-  float    bvh_keep;        /* 0 = off; >0 sparse-attention BVH keep-ratio */
+  /* v5.1 removes mv_ratio/bvh_keep: recompile API clients (layout changed). */
   int      gpu;             /* 1 = dual-band CPU+GPU del head (si Vulkan ayuda) */
   const char *lora_path;    /* NULL = sin adaptador */
   uint64_t seed;            /* 0 = no determinista */

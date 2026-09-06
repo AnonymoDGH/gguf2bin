@@ -177,11 +177,6 @@ g2b_error g2b_open(const char *path, const g2b_config *cfg, g2b_session **out){
   if(s->m.c.n_heads<=0 || s->m.c.dim<=0 || s->m.c.vocab<=0 || s->m.c.n_layers<=0){
     model_free(&s->m); free(s->src_path); free(s); return G2B_ERR_GEOMETRY;
   }
-  if(s->cfg.mv_ratio>0) s->m.mv_ratio=s->cfg.mv_ratio;
-  if(s->cfg.bvh_keep>0){
-    s->m.use_bvh=1; s->m.bvh_keep=s->cfg.bvh_keep;
-    fprintf(stderr,"[bvh] sparse %.2f\n",s->cfg.bvh_keep);
-  }
   if(s->cfg.lora_path && cyber_load_lora(&s->m,s->cfg.lora_path)){
     model_free(&s->m); free(s->src_path); free(s); return G2B_ERR_FORMAT;
   }
@@ -194,7 +189,6 @@ g2b_error g2b_open(const char *path, const g2b_config *cfg, g2b_session **out){
     } }
   { int nthr=s->cfg.threads;
     if(s->cfg.fast) apply_fast(&nthr); else if(nthr>0) set_threads(nthr); }
-  if(s->m.mv_ratio>0) fprintf(stderr,"[mv] ratio=%.2f\n", s->m.mv_ratio);
   sampler_seed(&s->samp, s->cfg.seed);
   *out=s;
   return G2B_OK;

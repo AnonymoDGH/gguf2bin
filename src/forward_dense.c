@@ -5,21 +5,6 @@
 #include <math.h>
 #include <assert.h>
 
-static inline int bvh_keep_pos(const Model *m, i32 pos, i32 t){
-  if(!m->use_bvh) return 1;
-  if(t >= pos-512) return 1;
-  if((t & 15)==0) return 1;
-  if(m->bvh_keep>0.2f && (t & 7)==0) return 1;
-  return 0;
-}
-static inline void ob_update(Model *m, f32 *logits){
-  if(!m->use_ob||!logits) return;
-  f32 mx1=-1e30f,mx2=-1e30f;
-  for(int i=0;i<m->c.vocab;i++){ f32 v=logits[i]; if(v>mx1){ mx2=mx1; mx1=v; } else if(v>mx2) mx2=v; }
-  m->ob_last_spread=mx1-mx2;
-}
-static inline f32 hdr_tonemap(f32 x){ return x/(1.f+fabsf(x)); }
-
 void load_vec_f32(Model *m, Slot *s, f32 *dst, i32 n){
   if(!s){ memset(dst,0,(size_t)n*4); return; }
   if(s->type==T_F32){ memcpy(dst,slot_ptr(m,s),(size_t)n*4); return; }
@@ -80,37 +65,6 @@ void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
 }
 
 /* ── LFM2 (LiquidAI): híbrido shortconv + atención ── */
-/* ── Swapeculative MV: predictor 2-bit + tabla hash de Motion Vectors ── */
-u32 mv_hash(i32 token){ return ((u32)token * 2654435761u) & (MV_TABLE_SIZE-1); }
-static inline int mv_should_skip(Model *m, i32 token){
-  if(!m->mv_table) return 0;
-  u32 h=mv_hash(token);
-  return m->mv_table[h].token==token && m->mv_table[h].pred >= 2;
-}
-void mv_update(Model *m, i32 token, int hit){
-  if(!m->mv_table) return;
-  u32 h=mv_hash(token);
-  if(m->mv_table[h].token != token){
-    m->mv_table[h].token=token; m->mv_table[h].pos=m->mv_seq; m->mv_table[h].pred= hit?2:1;
-  } else {
-    if(hit){ if(m->mv_table[h].pred < 3) m->mv_table[h].pred++; m->mv_hits++; }
-    else { if(m->mv_table[h].pred > 0) m->mv_table[h].pred--; m->mv_misses++; }
-    m->mv_table[h].pos=m->mv_seq;
-  }
-  m->mv_seq++;
-}
-int mv_tunable_skip(Model *m, i32 L, i32 pos, i32 token){
-  static i8 mv_off=-1; if(mv_off==-1){ mv_off=getenv("G2BX_MV_DISABLE")?1:0; }
-  if(mv_off) return 0;
-  float r = m->mv_ratio;
-  if(r <= 0.001f) return 0;
-  if(pos < 4) return 0;
-  // hash distribuye capas uniformemente según ratio
-  int roll = (int)(( (u32)L * 2654435761u + (u32)pos * 97u + (u32)token) % 100);
-  if(roll < (int)(r*100.0f)) return 1;
-  if(mv_should_skip(m, token)) return 1;
-  return 0;
-}
 
 void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   if(m->arch==ARCH_LFM2){ forward_lfm2(m,token,pos,logits,want_logits); return; }
@@ -139,7 +93,7 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   }
 
   FwdScratch _sc; fwd_scratch_dense(m,&_sc);
-  f32 *x=_sc.x, *xb=_sc.xb, *xb2=_sc.xb2, *hb=_sc.hb, *hb2=_sc.hb2;
+  f32 *x=_sc.x, *xb=_sc.xb, *hb=_sc.hb, *hb2=_sc.hb2;
   f32 *q=_sc.q, *k=_sc.k, *v=_sc.v, *att=_sc.att, *row=_sc.row;
 
   Slot *emb=slot_get(m,R_TOK_EMBD,-1);
@@ -209,7 +163,6 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
         for(i32 g=0; g<ngrp; g++){
           i32 h0=g*group, h1=h0+group; if(h1>c->n_heads) h1=c->n_heads;
           for(i32 t=0;t<=pos;t++){
-            if(!bvh_keep_pos(m,pos,t)){ for(i32 h=h0;h<h1;h++) att[(size_t)h*ctx+t]=-1e30f; continue; }
             kv_key_row_h(m,L,t,h0/group,krow);
             for(i32 h=h0;h<h1;h++)
               att[(size_t)h*ctx+t]=dot_hd(q+(size_t)h*hd,krow,hd)*scale;
@@ -220,7 +173,6 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
             for(i32 j=0;j<hd;j++) qh[j]=0.f;
           }
           for(i32 t=0;t<=pos;t++){
-            if(!bvh_keep_pos(m,pos,t)) continue;
             kv_val_row_h(m,L,t,h0/group,vrow);
             for(i32 h=h0;h<h1;h++)
               fma_hd(q+(size_t)h*hd,vrow,att[(size_t)h*ctx+t],hd);
@@ -237,45 +189,29 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
     Slot *fn=slot_get(m,R_FFN_NORM,L);
     load_vec_f32(m,fn,row,dim); rmsnorm(xb,x,row,dim,c->eps);
 
-    int mv_skip_ffn = 0;
-    if(mv_tunable_skip(m, L, pos, token)){
-      mv_skip_ffn=1; m->mv_skips++;
+    Slot *wg=slot_get(m,R_FFN_GATE,L);
+    Slot *wu=slot_get(m,R_FFN_UP,L);
+    Slot *wd=slot_get(m,R_FFN_DOWN,L);
+    if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
+    /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
+    if(m->lora_r){
+      matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row); lora_add(hb,xb,m->loraA_gate[L],m->loraB_gate[L],m->loraM_gate[L],dim,hid,m->lora_r);
+      matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
+    } else if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
+      matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
+    else {
+      matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
+      matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
     }
-    if(!mv_skip_ffn){
-      Slot *wg=slot_get(m,R_FFN_GATE,L);
-      Slot *wu=slot_get(m,R_FFN_UP,L);
-      Slot *wd=slot_get(m,R_FFN_DOWN,L);
-      if(require_slot(wg,"ffn_gate",L)||require_slot(wu,"ffn_up",L)||require_slot(wd,"ffn_down",L)) return;
-      /* Fusion gate+up idem: solo con slots contiguos y mismo tipo. */
-      if(m->lora_r){
-        matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row); lora_add(hb,xb,m->loraA_gate[L],m->loraB_gate[L],m->loraM_gate[L],dim,hid,m->lora_r);
-        matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
-      } else if(wg->type==wu->type && slot_ptr(m,wu)==slot_ptr(m,wg)+wg->nbytes)
-        matmul_q(hb,xb,slot_ptr(m,wg),wg->type,dim,hid*2,row);
-      else {
-        matmul_q(hb, xb,slot_ptr(m,wg),wg->type,dim,hid,row);
-        matmul_q(hb2,xb,slot_ptr(m,wu),wu->type,dim,hid,row);
-      }
-      silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
-      if(m->collect_stats && m->ffn_stats){
-        f32 *st=m->ffn_stats+(size_t)L*hid;
-        for(i32 i=0;i<hid;i++) st[i]+=fabsf(hb[i]);
-      }
-      matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
-      for(i32 i=0;i<dim;i++) x[i]+=xb[i];
-    } else {
-      // skip FFN: x ya tiene residual de atención, no se suma FFN
-      if(m->collect_stats && m->ffn_stats){
-        // aún cuenta como 0 para calib
-      }
+    silu_mul(hb, hb2, hid); /* gate=silu(gate)*up fusionado */
+    if(m->collect_stats && m->ffn_stats){
+      f32 *st=m->ffn_stats+(size_t)L*hid;
+      for(i32 i=0;i<hid;i++) st[i]+=fabsf(hb[i]);
     }
+    matmul_q(xb,hb,slot_ptr(m,wd),wd->type,hid,dim,row);
+    for(i32 i=0;i<dim;i++) x[i]+=xb[i];
   }
 
-  if(m->mv_table){
-    u32 h=mv_hash(token);
-    int seen = (m->mv_table[h].token==token);
-    mv_update(m, token, seen?1:0);
-  }
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
   if(!want_logits || !logits) return; /* prefill: saltar logits vocab×dim (carísimo) */
@@ -283,9 +219,7 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   if(!out) out=slot_get(m,R_TOK_EMBD,-1);
   if(require_slot(out,"output",-1)) return;
   /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
-  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)){ ob_update(m,logits); return; }
-  if(m->use_hdr){ for(int i=0;i<dim;i++) x[i]=hdr_tonemap(x[i]); }
+  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return;
   matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
-  ob_update(m,logits);
 }
 

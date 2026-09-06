@@ -120,7 +120,6 @@ void q8_dequant_row_avx2(const u8 *src, f32 *out, i32 n);
 void rmsnorm(f32 *o, f32 *x, f32 *w, i32 n, f32 eps);
 void softmax(f32 *x, i32 n); void silu(f32 *x, i32 n);
 void silu_mul(f32 *gate, const f32 *up, i32 n); /* gate = silu(gate)*up fusionado */
-void rope_th(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta);
 void rope_th_llama(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta);
 void rope_th_neox(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta);
 void qk_rmsnorm(f32 *x, const f32 *w, i32 n_heads, i32 head_dim, f32 eps);
@@ -154,12 +153,9 @@ int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(voi
 int g2bx_info(const char *path);
 
 typedef struct SHash SHash;
-typedef struct FMIndex FMIndex;
-struct FMIndex { char *bwt; u32 n; u32 C[256]; u32 *occ; };
 typedef struct {
   char **tok; i32 n; i32 bos, eos, unk;
   SHash *vocab; SHash *merges; char **mergestr; i32 nmerges;
-  FMIndex *fm;
 } Tokenizer;
 
 int tok_from_gguf(GGUF *g, Tokenizer *t);
@@ -190,21 +186,12 @@ typedef struct {
   /* recolección de estadísticas FFN para poda calibrada */
   u8 collect_stats;
   f32 *ffn_stats;             /* [n_layers x hidden]: Σ|silu(g)·u| por neurona */
-  /* Swapeculative MV — Triple Band Predictivo */
-#define MV_TABLE_SIZE 8192
-#define MV_PRED_STATES 4
-  struct { i32 token; i32 pos; u8 pred; u8 _pad[3]; } *mv_table; /* [MV_TABLE_SIZE] */
-  i32 mv_seq; /* contador de tokens para MV */
-  u64 mv_hits, mv_misses, mv_skips;
-  float mv_ratio; /* --mv 0.0..1.0 tasa de skip (0=off, 0.5=50% FFN/SSM) */
-  u8 use_bvh; float bvh_keep; /* BVH sparse attention */
-  u8 use_ob; float ob_thresh; float ob_last_spread; /* OrderBook */
-  u8 use_zram; /* Swap-ZRAM */
-  u8 use_hdr; /* HDR head */
-  /* CYBER-mRNA LoRA v2 DoRA+GaLore+MoE */
+  /* MV/BVH removed in Phase 7; measurements in docs/ROADMAP_PERF.md. */
+  /* LoRA inference (apply/save/load). El "entrenamiento" CYBER-mRNA vive en
+   * experimental/cyber-mrna (búsqueda estocástica, NO gradiente; ver README). */
   i32 lora_r; f32 **loraA_q, **loraB_q, **loraA_v, **loraB_v, **loraA_gate, **loraB_gate;
-  f32 **loraM_q, **loraM_v, **loraM_gate; /* DoRA magnitude */
-  f32 **galore_m, **galore_v; /* GaLore low-rank moments */
+  f32 **loraM_q, **loraM_v, **loraM_gate; /* escala por-salida (init 1.0) */
+  f32 **galore_m, **galore_v; /* momento low-rank del optimizador experimental */
   /* buffers del prefill batcheado ([B][...]) */
   i32 pf_B;
   f32 *pf_pool; /* base única del pool (lo único que se libera) */
@@ -299,11 +286,9 @@ int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop);
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
 int exp_synth_qwen_tiny(const char *out_path);
-int cyber_train(Model *m, const char *dataset, int steps, float lr, float replay);
-int cyber_train_particle(Model *m, const char *dataset, int steps, float temp_c);
+/* LoRA inference (src/l8_lora.c). Entrenamiento: experimental/cyber-mrna. */
 int cyber_save_lora(Model *m, const char *path);
 int cyber_load_lora(Model *m, const char *path);
-int cyber_pack_merge(const char *base_g2bx, const char *lora_path, const char *out_g2bx);
 void lora_add(f32 *out, const f32 *x, const f32 *A, const f32 *B, const f32 *M, int dim, int outdim, int r);
 
 #endif

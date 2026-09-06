@@ -17,7 +17,6 @@ int opts_common_try(OptsCommon *o, int argc, char **argv, int *i){
   else if(!strcmp(a,"--swap")){ o->swap=(k+1<argc && argv[k+1][0]!='-') ? argv[++k] : "@"; }
   else if(!strcmp(a,"--seed")&&k+1<argc) o->seed=(uint64_t)strtoull(argv[++k],NULL,10);
   else if(!strcmp(a,"--drop")&&k+1<argc) o->ndrop=atoi(argv[++k]);
-  else if(!strcmp(a,"--mv")&&k+1<argc) o->mv_ratio=(float)atof(argv[++k]);
   else if(!strcmp(a,"--gpu")) o->gpu=1;
   else return 0;
   *i=k;

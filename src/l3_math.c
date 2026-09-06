@@ -180,10 +180,6 @@ void rope_th_neox(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
     }
   }
 }
-/* Legacy alias: prefer rope_th_neox / rope_th_llama via model arch in l5. */
-void rope_th(f32 *x, i32 len, i32 pos, i32 head_dim, f32 theta){
-  rope_th_neox(x,len,pos,head_dim,theta);
-}
 void qk_rmsnorm(f32 *x, const f32 *w, i32 n_heads, i32 head_dim, f32 eps){
 #if defined(__AVX2__)
   for(i32 h=0;h<n_heads;h++){

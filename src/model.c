@@ -260,12 +260,6 @@ void model_free(Model *m){
   free(m->slots);
   model_unmap(m);
   free_rt(m);
-  free(m->mv_table); m->mv_table=NULL;
-  if(m->mv_misses + m->mv_hits > 0){
-    fprintf(stderr,"[mv] hits=%llu misses=%llu skips=%llu hitrate=%.1f%%\n",
-      (unsigned long long)m->mv_hits,(unsigned long long)m->mv_misses,(unsigned long long)m->mv_skips,
-      100.0*(double)m->mv_hits/(double)(m->mv_hits+m->mv_misses));
-  }
   if(m->lora_r){
    for(int L=0; L<m->c.n_layers; L++){ free(m->loraA_q[L]); free(m->loraB_q[L]); free(m->loraA_v[L]); free(m->loraB_v[L]); free(m->loraA_gate[L]); free(m->loraB_gate[L]); free(m->loraM_q[L]); free(m->loraM_v[L]); free(m->loraM_gate[L]); free(m->galore_m[L]); free(m->galore_v[L]); }
    free(m->loraA_q); free(m->loraB_q); free(m->loraA_v); free(m->loraB_v); free(m->loraA_gate); free(m->loraB_gate); free(m->loraM_q); free(m->loraM_v); free(m->loraM_gate); free(m->galore_m); free(m->galore_v);

@@ -9,7 +9,7 @@ LDFLAGS ?= -lm -fopenmp
 CORE = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
        src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c \
        src/forward_hybrid.c src/forward_prefill.c \
-       src/l6_token.c src/l7_vulkan.c src/l8_cyber.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
+       src/l6_token.c src/l7_vulkan.c src/l8_lora.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
 SRC = $(CORE) src/main.c
 HDRS = include/gguf2bin.h include/version.h src/internal/g2b.h src/internal/g2bx_io.h \
        src/internal/opts.h src/internal/os_mm.h src/internal/sampler.h
@@ -55,7 +55,7 @@ tiny.exe: $(SRC) $(HDRS)
 	$(CC) -Os -std=c99 -ffunction-sections -fdata-sections -Iinclude -Wall -o $@ $(SRC) -lm -Wl,--gc-sections -s
 
 # Portable smoke test (Windows + Unix)
-test: $(EXE) apitest selftest
+test: $(EXE) $(APIEXE) $(STEXE)
 	./$(EXE) synth $(TEST_MODEL)
 	./$(EXE) info $(TEST_MODEL)
 	./$(EXE) run $(TEST_MODEL) -n 4 -t 0
@@ -73,7 +73,7 @@ $(APIEXE): tools/apitest.c $(CORE) $(HDRS)
 STSRC = tools/selftest.c $(CORE)
 selftest: $(STEXE)
 	./$(STEXE) $(TEST_MODEL) .
-$(STEXE): $(STSRC)
+$(STEXE): $(STSRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(STSRC) $(LDFLAGS)
 
 # Valida equivalencia F32 vs Q8 KV sobre un modelo (por defecto el sintetico)

@@ -19,13 +19,14 @@ Sustained decode with `--fast` (high priority + OpenMP + quantized KV).
 | Model | Weights (mmap) | Runtime RAM | decode | prefill |
 |---|---|---|---|---|
 | **Qwen2.5-3B** Q4_0 | 1992 MB | 145 MB | **4.3** | 7.8 |
-| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 / **40.1** (`--mv 0.5`) / 39.2 (`--mv 1.0`) | **47.9** |
+| **Qwen3-0.6B** Q4_0 | 319 MB | 511 MB | 25.0 | **47.9** |
 | **LFM2.5-1.2B** Q4_0S | 567 MB | 631 MB | **15.7** | 17.9 |
 | Llama-3.2-1B F16 | 804 MB | 644 MB | 13.8 | — |
-| Llama-3.2-1B Q4_0S_PSY | 737 MB | 644 MB | 14.7 / **30.6** (`--mv 0.5`) | — |
 | SmolLM2-135M Q4_0 | 72 MB | 40 MB | **59.5** | — |
 
-Measured 2026-08-31 on i5-6200U with `bench -n 32` (min3). `--mv 0.5` Swapeculative + fallback TLS buf → Qwen3 25.0→40.1 tok/s (**+60%**), Llama Q4_0S_PSY 14.7→30.6 (**+108%**). `--psy` (2 scales/256, 132B) gives better ppl than Q4_0S at same speed. At ~25 tok/s decode pinned to DDR3L ~9 GB/s; prefill hits compute ~27 GMAC/s.
+Measured 2026-08-31 on i5-6200U with `bench -n 32` (min3). At ~25 tok/s decode
+pinned to DDR3L ~9 GB/s; prefill hits compute ~27 GMAC/s. (`--mv` speedups
+removed in v5.1.0: the skip destroyed ppl ×1400 — speed of a broken model.)
 
 ## 🚀 Quick start
 
@@ -99,8 +100,37 @@ Perplexity (internal corpus, SmolLM2-135M-Instruct): uniform Q4_0 = 73.7 *(broke
 native Q4_K_M = **48.7**, Q6_K = 48.0, Q8_0 = 48.0. Native K-quants keep Q8_0-level
 quality within 1.4 % while running faster than uniform Q4_0.
 
+Measured 2026-09-05 in separate CLI processes, using the pre-edit
+README+README.es+G2BX_SPEC corpus. These are short local checks, not a
+standard benchmark; model provenance and quantization paths need further validation.
+
+| Model / format | ppl | vs base |
+|---|---:|---|
+| Qwen3-0.6B Q4_0 | 25.4 | — |
+| Qwen3-0.6B Q8_0 | 20.8 | −18 % |
+| LFM2.5-1.2B q4max | 28.1 | — |
+| LFM2.5-1.2B q4s | 34.9 | +24 % |
+| Llama-3.2-1B baseline (256 tokens) | 83.966 | — |
+| Llama-3.2-1B **Q4_VVC** (256 tokens) | 1177.176 | ×14 |
+| Llama-3.2-1B baseline (128 tokens) | 82.325 | — |
+| Llama-3.2-1B **Q4_0S_PSY** (128 tokens) | 2380555.838 | ×28916 |
+
+Qwen and LFM2 rows use 1024 tokens. LFM2 Q4_0S increased ppl by about 24%.
+The tested PSY/VVC artifacts showed severe degradation; the root cause is
+not isolated to the format itself. Their pack/load paths remain available
+but are not recommended until re-validated. The types at 0x80+ are custom
+G2BX types, not standard GGUF types supported by other runtimes.
+
 Included numerical validation: `make kvtest` (F32 vs Q8 KV), `tools/prefilltest`
 (bit-exact batched prefill), `tools/qkcheck` (46/46 K-quant kernels).
+
+Removed in v5.1.0 (measured, see `docs/ROADMAP_PERF.md` Phase 7): `--mv` and
+`--bvh` (large ppl increases at the tested ratios), `cyber-*` commands (reported accuracy and particle-loop loss were
+not real — experiment archived in `experimental/cyber-mrna/`), dead
+OrderBook/HDR/ZRAM/FM-index paths. `--cyber <lora.bin>` still loads real
+LoRA adapters (v1/v2).
+The removal of `mv_ratio`/`bvh_keep` changes the public `g2b_config` layout:
+recompile API clients against the new header; do not mix old headers and new libraries.
 
 <details>
 <summary><b>📦 G2BX format & supported types</b></summary>
@@ -159,10 +189,10 @@ docs/G2BX_SPEC.md    format spec · docs/RESEARCH.md  notes + roadmap
 - **Weight traffic ÷4 in `matmul_q4_0_b` / `matmul_q4_0s_b`**: each weight row is unpacked once and reused for 4 tokens (was: re-streamed per token, 16× per batch). Qwen3-0.6B Q4_0 prefill 38.9 → **53.7 tok/s (+38 %)** and Qwen2.5-3B Q4_0 7.0 → **9.6 tok/s (+37 %)** (interleaved A/B on i5-6200U). Bit-exact (`prefilltest` diff 0 incl. 3B GQA, `q4bcheck` 5/5, ppl identical 58.709). Decode untouched (3B: 5.4 = 5.4); 27B IQ1_S hybrid output byte-identical to stock.
 
 #### v4.7 — Q4_0S_PSY (psicoacústico) + fallback TLS
-- **Q4_0S_PSY**: 2 escalas fp16 por 256 (132B vs 130B) — baja 128 + alta 128, como MP3. `pack --psy` → +6% speed y mejor ppl que Q4_0S. Llama-3.2-1B 14.7 tok/s (PSY) → 30.6 con `--mv 0.5` (+108%). Fallback IQ ahora TLS buf → qwen38 no hace malloc por fila.
+- **Q4_0S_PSY**: 2 escalas fp16 por 256 (132B vs 130B). La mejora de calidad anunciada queda retirada: la prueba local de 128 tokens dio ppl 2380555.838 frente a 82.325 base. El soporte permanece, desaconsejado hasta validar la causa. Fallback IQ usa TLS para evitar malloc por fila.
 
 #### v4.6 — Swapeculative MV Triple Band
-- **--mv 0.0..1.0**: tunable skip of FFN (dense) / SSM delta (hybrid) via hash + 2-bit predictor. `25.0 → 40.1 tok/s (+60%)` on Qwen3-0.6B Q4_0 with `--mv 0.5`, `39.2` with `--mv 1.0` on i5-6200U. Quality tradeoff as expected — use 0.3-0.5 for speed, 0 for quality. Works on all archs (Qwen3/Llama/LFM2/Qwen35).
+- **--mv 0.0..1.0**: tunable skip of FFN (dense) / SSM delta (hybrid) via hash + 2-bit predictor. `25.0 → 40.1 tok/s (+60%)` on Qwen3-0.6B Q4_0. **[RETIRADO v5.1: ppl 25.4 → 35 629 (×1400) a ratio 0.1, 352 904 a 0.5. La velocidad era la de un modelo roto. Ver Phase 7.]**
 
 #### v4.5
 - Batched (prefill) kernel with deferred accumulation: same treatment as the decode kernel. Qwen2.5-3B prefill 4.3 → 7.8 tok/s (+81 %), bit-exact (`tools/prefilltest`). Sets the stage for speculative verification.
