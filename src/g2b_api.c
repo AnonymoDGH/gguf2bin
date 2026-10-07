@@ -485,7 +485,10 @@ g2b_error g2b_chat_turn(g2b_session *s, const char *user_utf8,
        ||conv_push_str(s,"\n")||conv_push(s,s->im_start)||conv_push_str(s,"assistant\n");
     free(ub);
     if(bad) return G2B_ERR_OOM;
-    if(s->no_think && s->think_start>=0 && s->think_end>=0){
+    /* <think></think> vacío = convención Qwen3/3.5 (enable_thinking=False).
+     * LFM2.5 tiene esos tokens pero su plantilla no lo inyecta: con él el
+     * modelo arranca "corrigiéndose" ("Wait! Let me correct that..."). */
+    if(s->no_think && s->think_start>=0 && s->think_end>=0 && m->arch!=ARCH_LFM2){
       if(conv_push(s,s->think_start)||conv_push_str(s,"\n\n")
          ||conv_push(s,s->think_end)||conv_push_str(s,"\n\n"))
         return G2B_ERR_OOM;
@@ -600,10 +603,15 @@ g2b_error g2b_ppl(g2b_session *s, const char *text, int max_tokens,
   if(!logits){ free(ids); return G2B_ERR_OOM; }
   double nll=0; i32 count=0;
   i32 win=m->ctx>0?m->ctx:m->c.seq_len;
-  for(i32 base=0; base<nt-1; base+=win){
-    i32 end = base+win<nt ? base+win : nt;
+  if(win<2){ free(logits); free(ids); return G2B_ERR_CONTEXT; }
+  for(i32 base=0; base<nt-1; ){
+    /* ventanas 2+: reabrir con BOS en pos 0 (como llama.cpp perplexity);
+     * sin él los modelos que dependen de BOS (LFM2) puntúan basura */
+    i32 off=0;
+    if(base>0 && m->tok->bos>=0){ model_forward_ex(m,m->tok->bos,0,NULL,0); off=1; }
+    i32 end = base+(win-off)<nt ? base+(win-off) : nt;
     for(i32 p=base; p<end-1; p++){
-      model_forward_ex(m,ids[p],p-base,logits,1);
+      model_forward_ex(m,ids[p],off+p-base,logits,1);
       f32 mx=logits[0];
       for(i32 v=1;v<m->c.vocab;v++) if(logits[v]>mx) mx=logits[v];
       double lse=0;
@@ -612,6 +620,7 @@ g2b_error g2b_ppl(g2b_session *s, const char *text, int max_tokens,
       nll += lse-(double)logits[ids[p+1]];
       count++;
     }
+    base=end;
   }
   free(logits); free(ids);
   out->tokens=nt; out->evaluated=count;

@@ -185,6 +185,8 @@ docs/G2BX_SPEC.md    format spec · docs/RESEARCH.md  notes + roadmap
 - **pack --prune**: `ffn_down` copy assumed one block per group (broken for F16/F32/Q8_0 down); OOM mid-prune now aborts. Tensors >4 GB are rejected instead of truncating `Slot.nbytes`.
 - **Untrusted .g2bx hardening** (the Android app downloads from any URL): slot `nbytes` validated against geometry, geometry caps against i32 overflow, blob-past-EOF and offset-overflow checks, non-mmap fallback read from the right offset.
 - **Android JNI**: `freeModel` could free the model while `generate` still ran (use-after-free); tokens are emitted as whole UTF-8 characters via UTF-16 (`NewStringUTF` broke on split characters and emojis).
+- **Chat (LFM2)**: the empty `<think></think>` block (Qwen3 `enable_thinking=False` convention) was injected into LFM2.5 too, whose template has no such block; the model opened every answer "correcting itself". Found and verified on the release `lfm25-1.2b-q4s.g2bx` (now answers "Paris" / "Madrid").
+- **ppl**: windows after the first now restart with BOS, like llama.cpp (LFM2 at `-c 128`: 485 → 109; single-window results unchanged).
 - `g2b_pack` no longer leaks the Q4_0S/PSY/VVC mode into later calls; chat prompts are no longer truncated at 4/9 KB; default `--swap` file is per-process and opened with `O_NOFOLLOW`.
 
 #### v5.0 — G2BX v3: CRC'd format + own type namespace

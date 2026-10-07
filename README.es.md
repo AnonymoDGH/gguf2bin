@@ -151,6 +151,7 @@ docs/G2BX_SPEC.md    spec del formato · docs/RESEARCH.md  notas + roadmap
 - **LoRA** ignorado en el prefill batcheado; **pack --prune** corrompía `ffn_down` con F16/F32/Q8_0; tensores >4 GB rechazados.
 - **Endurecimiento ante .g2bx no confiables** (la app Android descarga de cualquier URL): `nbytes` de cada slot validado contra la geometría, topes contra overflow i32, comprobaciones de EOF/offsets.
 - **JNI Android**: use-after-free entre `freeModel` y `generate`; tokens emitidos como caracteres UTF-8 completos.
+- **Chat LFM2**: ya no se inyecta el bloque `<think></think>` vacío (convención de Qwen3) que hacía que LFM2.5 empezara "corrigiéndose". **ppl**: las ventanas 2+ reabren con BOS como llama.cpp.
 
 #### v5.0 — G2BX v3: formato con CRC + namespace de tipos propio
 - **Footer CRC32**: todo `.g2bx` nuevo termina en `[crc32 de lo previo][magic]`; el loader lo verifica al abrir y rechaza truncados/corruptos con mensaje claro. Nuevo comando `verify` (header + slots + tipos + geometría + CRC sin cargar pesos).
