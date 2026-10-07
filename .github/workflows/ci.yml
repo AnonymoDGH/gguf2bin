@@ -61,7 +61,9 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+          # libgomp va en paquete aparte desde el split de gcc (solo optdepends):
+          # sin él, -fopenmp falla con "cannot find -lgomp"
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-libgomp mingw-w64-x86_64-make
       - name: build+test
         run: mingw32-make && mingw32-make test && mingw32-make kvtest && mingw32-make q4bcheck && mingw32-make iq1check && mingw32-make q3kcheck && mingw32-make prefilltest
 
