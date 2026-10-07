@@ -946,7 +946,8 @@ void matmul_q4_0s_psy(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
       _mm_prefetch(row+((b>>3)+9)*132,_MM_HINT_T0);
       f32 ws0=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+0));
       f32 ws1=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+2));
-      const u8 *rb=row+(size_t)(b>>3)*132+4;
+      /* nibbles en +4; Q4_BLK_EXPAND ya suma +2 (offset de la escala Q4_0) */
+      const u8 *rb=row+(size_t)(b>>3)*132+2;
       Q4_BLK_ACC(rb, 16*0,_mm256_loadu_si256((const __m256i*)(q8+(size_t)b*32)),      ws0*q8d[b]  ,acc);
       Q4_BLK_ACC(rb, 16*1,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+1)*32)),  ws0*q8d[b+1],acc);
       Q4_BLK_ACC(rb, 16*2,_mm256_loadu_si256((const __m256i*)(q8+(size_t)(b+2)*32)),  ws0*q8d[b+2],acc);
@@ -973,17 +974,17 @@ void matmul_q4_0s_psy_b(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d, i32 B
     for(i32 t=0;t<B;t++){
       const u8 *qa=q8+(size_t)t*n;
       __m256 acc=_mm256_setzero_ps();
-      for(i32 b=0;b<nb;b+=8){
+      for(i32 b=0;b<nb;b+=8){ /* +2: ver matmul_q4_0s_psy */
         f32 ws0=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+0));
         f32 ws1=(f32)half_to_float(*(const u16*)(row+(size_t)(b>>3)*132+2));
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*0,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),      ws0*q8d[(size_t)t*nb+b]  ,acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*1,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+1)*32)),ws0*q8d[(size_t)t*nb+b+1],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*2,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+2)*32)),ws0*q8d[(size_t)t*nb+b+2],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*3,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+3)*32)),ws0*q8d[(size_t)t*nb+b+3],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*4,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+4)*32)),ws1*q8d[(size_t)t*nb+b+4],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*5,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+5)*32)),ws1*q8d[(size_t)t*nb+b+5],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*6,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+6)*32)),ws1*q8d[(size_t)t*nb+b+6],acc);
-        Q4_BLK_ACC(row,(size_t)(b>>3)*132+4+16*7,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+7)*32)),ws1*q8d[(size_t)t*nb+b+7],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*0,_mm256_loadu_si256((const __m256i*)(qa+(size_t)b*32)),      ws0*q8d[(size_t)t*nb+b]  ,acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*1,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+1)*32)),ws0*q8d[(size_t)t*nb+b+1],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*2,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+2)*32)),ws0*q8d[(size_t)t*nb+b+2],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*3,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+3)*32)),ws0*q8d[(size_t)t*nb+b+3],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*4,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+4)*32)),ws1*q8d[(size_t)t*nb+b+4],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*5,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+5)*32)),ws1*q8d[(size_t)t*nb+b+5],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*6,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+6)*32)),ws1*q8d[(size_t)t*nb+b+6],acc);
+        Q4_BLK_ACC(row,(size_t)(b>>3)*132+2+16*7,_mm256_loadu_si256((const __m256i*)(qa+(size_t)(b+7)*32)),ws1*q8d[(size_t)t*nb+b+7],acc);
       }
       Q4_ROW_HSUM(acc,out+(size_t)t*d+i);
     }

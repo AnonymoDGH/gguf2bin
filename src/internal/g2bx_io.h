@@ -28,6 +28,7 @@ typedef struct {
  * 0 ok | -1 header inválido/truncado | -2 versión no soportada (h.ver válido)
  * | -3 footer CRC inválido (solo v3).
  * En v1/v2 normaliza los tipos legacy 25/26/27 al namespace 0x80+.
+ * En cualquier error no deja memoria que liberar (slots=NULL).
  * No cierra f; la posición final no está definida (los llamadores hacen seek). */
 int g2bx_read_header(FILE *f, G2bxHeader *h);
 void g2bx_header_free(G2bxHeader *h);

@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* fmemopen (fuzz_mem.h); antes de cualquier include */
 /* fuzz_g2bx.c — LibFuzzer: g2bx_read_header (formato propio).
  * Igual compilación que fuzz_gguf.c.
  */

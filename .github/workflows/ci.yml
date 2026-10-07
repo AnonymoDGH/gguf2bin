@@ -21,9 +21,9 @@ jobs:
       - name: build+test con sanitizers
         run: >
           make clean;
-          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" &&
-          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" test &&
-          make CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" kvtest prefilltest q4bcheck iq1check q3kcheck
+          make CFLAGS="-O1 -g -mavx2 -mfma -mf16c -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" &&
+          make CFLAGS="-O1 -g -mavx2 -mfma -mf16c -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" test &&
+          make CFLAGS="-O1 -g -mavx2 -mfma -mf16c -fsanitize=address,undefined -fno-omit-frame-pointer -std=c99 -Iinclude -Isrc" LDFLAGS="-fsanitize=address,undefined -lm" kvtest prefilltest q4bcheck iq1check q3kcheck
 
   fuzz-build:
     runs-on: ubuntu-latest
@@ -31,22 +31,24 @@ jobs:
       - uses: actions/checkout@v4
       - name: deps
         run: sudo apt-get update && sudo apt-get install -y clang cmake python3
+      # `run: |` + `\`: con `>` las líneas más sangradas conservan el salto de
+      # línea y clang se invocaba sin archivos ("no input files").
       - name: compila harnesses libFuzzer
-        run: >
+        run: |
           for t in gguf g2bx tok; do
-            clang -O1 -g -fsanitize=fuzzer,address -fno-omit-frame-pointer
-              -std=c99 -Iinclude -Isrc -o /tmp/fuzz_$t tools/fuzz/fuzz_$t.c
-              src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c
-              src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c
-              src/forward_hybrid.c src/forward_prefill.c
-              src/l6_token.c src/l7_vulkan.c src/l8_lora.c
-              src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
-              -lm;
+            clang -O1 -g -fsanitize=fuzzer,address -fno-omit-frame-pointer \
+              -std=c99 -Iinclude -Isrc -o /tmp/fuzz_$t tools/fuzz/fuzz_$t.c \
+              src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
+              src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c \
+              src/forward_hybrid.c src/forward_prefill.c \
+              src/l6_token.c src/l7_vulkan.c src/l8_lora.c \
+              src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c \
+              -lm -ldl
           done
       - name: corre corpus (60s por target)
-        run: >
+        run: |
           for t in gguf g2bx tok; do
-            timeout 60 /tmp/fuzz_$t tools/fuzz/corpus/ -max_total_time=45 || [ $? -eq 124 ];
+            timeout 60 /tmp/fuzz_$t tools/fuzz/corpus/ -max_total_time=45 || [ $? -eq 124 ]
           done
 
   mingw:

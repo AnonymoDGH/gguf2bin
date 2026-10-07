@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 /* kv.c — KV cache F32/Q8, swap a disco, runtime alloc, TLS (split de l5, Fase 3) */
 #include "internal/g2b.h"
 #include <stdlib.h>
@@ -108,6 +110,7 @@ void free_rt(Model *m){
   free(m->ffn_stats); m->ffn_stats=NULL;
   free(m->conv_state); m->conv_state=NULL;
   free(m->ssm_st); m->ssm_st=NULL;
+  m->conv_state_n=m->ssm_st_n=0;
   if(m->use_swap && m->swapmap.view){ kv_swap_free(m); return; }
   free(m->kcache); free(m->vcache); free(m->kcq); free(m->vcq);
   m->kcache=NULL; m->vcache=NULL; m->kcq=NULL; m->vcq=NULL;
@@ -119,15 +122,19 @@ int alloc_rt(Model *m, i32 ctx){
   int q8=((m->flags&F_KV_Q8) && !m->no_kv_q8)?1:0;
   i32 maxn=dim>hid?dim:hid; if(c->vocab>maxn) maxn=c->vocab;
   if(m->arch==ARCH_LFM2 && 3*dim>maxn) maxn=3*dim;
-  i32 nbuf=dim*3 + hid*2 + nq + nkv*2 + c->n_heads*ctx + maxn;
+  size_t nbuf=(size_t)dim*3 + (size_t)hid*2 + (size_t)nq + (size_t)nkv*2
+             + (size_t)c->n_heads*(size_t)ctx + (size_t)maxn;
   /* qwen35: scratch GDN (qkv[inner+2gds] + z + o) + atención gated (wq 2nq + gate nq)
      + scores (nh*ctx); ver hybrid_scratch() */
-  if(m->arch==ARCH_QWEN35)
-    nbuf += c->ssm_inner*3 + 2*c->ssm_n_group*c->ssm_d_state
-          + 3*c->n_heads*c->head_dim + c->n_heads*ctx + 64;
-  m->buf=malloc((size_t)nbuf*sizeof(f32)); /* no calloc: se sobreescribe antes de leer */
+  if(m->arch==ARCH_QWEN35){
+    size_t hyb = (size_t)c->ssm_inner*3 + 2*(size_t)c->ssm_n_group*(size_t)c->ssm_d_state
+               + 3*(size_t)c->n_heads*(size_t)c->head_dim + (size_t)c->n_heads*(size_t)ctx + 64;
+    if(hyb < 2*(size_t)hid) hyb = 2*(size_t)hid; /* el FFN reusa el scratch híbrido para hb|hb2 */
+    nbuf += hyb;
+  }
+  m->buf=malloc(nbuf*sizeof(f32)); /* no calloc: se sobreescribe antes de leer */
   if(!m->buf) return -1;
-  m->buf_floats=(size_t)nbuf; /* tope para los asserts de carve (A25) */
+  m->buf_floats=nbuf; /* tope para los asserts de carve (A25) */
   size_t half = 0, usize = 0;
   i32 nkvL=kv_nlayers(m);
   if(q8){ size_t qr=kv_q8_rowsize(nkv); half=(size_t)nkvL*(size_t)ctx*qr; }
@@ -166,7 +173,8 @@ int alloc_rt(Model *m, i32 ctx){
   fprintf(stderr,"alloc_rt: buf=%p pool=%p B=%d nx=%.1fMB ctx=%d\n",(void*)m->buf,(void*)m->pf_pool,B,nx/1048576.0,ctx);
 #endif
   if(m->arch==ARCH_LFM2){
-    m->conv_state=calloc((size_t)c->n_layers*2u*(size_t)dim,sizeof(f32));
+    m->conv_state_n=(size_t)c->n_layers*2u*(size_t)dim;
+    m->conv_state=calloc(m->conv_state_n,sizeof(f32));
     if(!m->conv_state){ free_rt(m); return -1; }
   }
   if(m->arch==ARCH_QWEN35 && c->fa_interval>0){
@@ -179,8 +187,13 @@ int alloc_rt(Model *m, i32 ctx){
     m->ssm_st=calloc(ns,sizeof(f32));
     m->conv_state=calloc(nc,sizeof(f32));
     if(!m->ssm_st||!m->conv_state){ free_rt(m); return -1; }
+    m->ssm_st_n=ns; m->conv_state_n=nc;
   }
   return 0;
+}
+void rt_reset_state(Model *m){
+  if(m->conv_state && m->conv_state_n) memset(m->conv_state,0,m->conv_state_n*sizeof(f32));
+  if(m->ssm_st && m->ssm_st_n) memset(m->ssm_st,0,m->ssm_st_n*sizeof(f32));
 }
 
 /* Respaldar la KV cache en un archivo (p.ej. D:) para que las páginas frías
@@ -202,7 +215,7 @@ int kv_is_q8(const Model *m){ return (m->flags&F_KV_Q8) && !m->no_kv_q8; }
    El slot KV de la capa L es L/interval; las capas SSM no tocan la cache. */
 
 static size_t kv_pos_offset(Model *m, i32 layer, i32 pos){
-  i32 nl=kv_nlayers(m), idx=kv_lidx(m,layer);
+  i32 idx=kv_lidx(m,layer);
   return ((size_t)idx*m->ctx + (size_t)pos) * (size_t)m->c.n_kv_heads * (size_t)m->c.head_dim;
 }
 void kv_store(Model *m, i32 layer, i32 pos, const f32 *k, const f32 *v){

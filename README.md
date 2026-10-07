@@ -116,9 +116,11 @@ standard benchmark; model provenance and quantization paths need further validat
 | Llama-3.2-1B **Q4_0S_PSY** (128 tokens) | 2380555.838 | ×28916 |
 
 Qwen and LFM2 rows use 1024 tokens. LFM2 Q4_0S increased ppl by about 24%.
-The tested PSY/VVC artifacts showed severe degradation; the root cause is
-not isolated to the format itself. Their pack/load paths remain available
-but are not recommended until re-validated. The types at 0x80+ are custom
+The tested PSY/VVC artifacts showed severe degradation. For PSY a root cause
+was found in v5.1.1: both AVX2 kernels read the nibbles 2 bytes off, so the
+PSY row above measures a broken kernel, not the format; it needs re-measuring.
+VVC is a plain 3-bit uniform quant with one scale per 256 (no inter-row
+prediction is implemented). Both remain not recommended until re-validated. The types at 0x80+ are custom
 G2BX types, not standard GGUF types supported by other runtimes.
 
 Included numerical validation: `make kvtest` (F32 vs Q8 KV), `tools/prefilltest`
@@ -173,6 +175,17 @@ docs/G2BX_SPEC.md    format spec · docs/RESEARCH.md  notes + roadmap
 
 <details>
 <summary><b>📜 Changelog</b></summary>
+
+#### v5.1.1 — review fixes
+- **CI green again** (red since Phase 3): `strdup`/`fseeko`/`ftello`/`clock_gettime` were implicitly declared under `-std=c99` — on Linux x86-64 the truncated `strdup` pointer crashed `make test`, and `ftello` truncated offsets >2 GB. Also fixed: fuzz job YAML (`>` folded the clang lines apart), `fmemopen` in the harnesses, MinGW `copy` under MSYS2 `sh`, CMake include dirs, AVX2 flags in the sanitizer job.
+- **Tokenizer**: `u2b[289]` overflowed (68 remapped bytes → indices up to 323); bytes 0x7F–0xA0/0xAD decoded wrong (€, à, emojis). `tok_read_section` leaked on early errors.
+- **Q4_0S_PSY kernels** (decode + batched) read nibbles 2 bytes off.
+- **qwen35**: attention `wo` used `n=dim` instead of `n_heads*head_dim`. **LFM2/qwen35** recurrent state was never reset at `pos 0` (ppl windows, `chat_reset`, compaction and the Android app inherited the previous sequence).
+- **LoRA**: batched prefill skipped the adapter (now falls back to sequential); loader validates rank and reads.
+- **pack --prune**: `ffn_down` copy assumed one block per group (broken for F16/F32/Q8_0 down); OOM mid-prune now aborts. Tensors >4 GB are rejected instead of truncating `Slot.nbytes`.
+- **Untrusted .g2bx hardening** (the Android app downloads from any URL): slot `nbytes` validated against geometry, geometry caps against i32 overflow, blob-past-EOF and offset-overflow checks, non-mmap fallback read from the right offset.
+- **Android JNI**: `freeModel` could free the model while `generate` still ran (use-after-free); tokens are emitted as whole UTF-8 characters via UTF-16 (`NewStringUTF` broke on split characters and emojis).
+- `g2b_pack` no longer leaks the Q4_0S/PSY/VVC mode into later calls; chat prompts are no longer truncated at 4/9 KB; default `--swap` file is per-process and opened with `O_NOFOLLOW`.
 
 #### v5.0 — G2BX v3: CRC'd format + own type namespace
 - **CRC32 footer**: every new `.g2bx` ends with `[crc32 of everything before][magic]`; the loader verifies on open (warming the page cache as a side effect) and rejects truncated/corrupt files with a clear message. New `verify` command (header + slots + types + geometry + CRC without loading weights).

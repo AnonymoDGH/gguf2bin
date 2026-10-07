@@ -178,6 +178,7 @@ typedef struct {
   u8 no_kv_q8;                /* geometría incompatible con KV Q8 (head_dim%32) */
   f32 *conv_state;            /* LFM2/qwen35: estado conv por capa */
   f32 *ssm_st;                /* qwen35: estado recurrente GDN [n_recr][nv][dv][dv] */
+  size_t conv_state_n, ssm_st_n; /* floats de conv_state/ssm_st (reset en pos 0) */
   /* ShortGPT: salto de bloques redundantes */
   u8 *skip_layer;             /* [n_layers] 1=omitir bloque completo */
   f32 *bi_pre, *bi_post;      /* scratch dim para medir Block Influence */
@@ -236,6 +237,9 @@ static inline void fwd_scratch_dense(const Model *m, FwdScratch *s){
 /* runtime KV + alloc (kv.c) */
 void free_rt(Model *m);
 int alloc_rt(Model *m, i32 ctx);
+/* Pone a cero el estado recurrente (LFM2 conv / qwen35 GDN). Lo llaman los
+ * forwards recurrentes en pos==0: una secuencia nueva no hereda la anterior. */
+void rt_reset_state(Model *m);
 int kv_is_q8(const Model *m);
 size_t kv_q8_rowsize(i32 nkv);
 i32 kv_nlayers(const Model *m);

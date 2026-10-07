@@ -47,7 +47,7 @@ all: $(EXE)
 $(EXE): $(SRC) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
 ifeq ($(OS),Windows_NT)
-	copy /Y $@ gguf2bin.exe
+	cp -f $@ gguf2bin.exe 2>/dev/null || copy /Y $@ gguf2bin.exe >NUL
 endif
 
 tiny: tiny.exe
@@ -119,5 +119,6 @@ clean:
 	-rm -f /tmp/tiny_test.g2bx 2>/dev/null || true
 endif
 
+# Windows: `cp` si make usa sh (MSYS2/Git Bash), `copy` si usa cmd.exe.
 # Windows (MinGW) sin OpenMP / native si falla:
 #   gcc -O2 -std=c99 -Iinclude -o gguf2bin2.exe $(CORE) src/main.c -lm

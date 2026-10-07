@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 /* g2b_api.c — implementación de la API pública (include/gguf2bin.h).
  *
  * Wrapper fino sobre los internals (src/internal/g2b.h): la lógica de cómputo
@@ -18,6 +20,7 @@
 #include <windows.h>
 #else
 #include <sys/resource.h>
+#include <unistd.h>
 #endif
 #if defined(_OPENMP)
 #include <omp.h>
@@ -118,15 +121,19 @@ static int drive_ok(const char *root){
   (void)root; return 0;
 #endif
 }
+/* Nombre por proceso: dos instancias no comparten (ni truncan) la misma KV. */
 static const char *default_swap(void){
-#if defined(_WIN32)
   static char buf[300];
-  if(drive_ok("D:\\")) snprintf(buf,sizeof buf,"D:\\gguf2bin2_kv.swap");
-  else { if(!GetTempPathA(sizeof buf,buf)) strcpy(buf,"C:\\"); strncat(buf,"gguf2bin2_kv.swap",sizeof buf-strlen(buf)-1); }
-  return buf;
+#if defined(_WIN32)
+  char name[64]; snprintf(name,sizeof name,"gguf2bin2_kv.%lu.swap",(unsigned long)GetCurrentProcessId());
+  if(drive_ok("D:\\")) snprintf(buf,sizeof buf,"D:\\%s",name);
+  else { if(!GetTempPathA(sizeof buf,buf)) strcpy(buf,"C:\\"); strncat(buf,name,sizeof buf-strlen(buf)-1); }
 #else
-  return "/tmp/gguf2bin2_kv.swap";
+  const char *td=getenv("TMPDIR");
+  if(!td || !*td) td="/tmp";
+  snprintf(buf,sizeof buf,"%s/gguf2bin2_kv.%ld.swap",td,(long)getpid());
 #endif
+  return buf;
 }
 static i32 find_tok(Tokenizer *t, const char *s){
   for(i32 i=0;i<t->n;i++) if(t->tok[i]&&!strcmp(t->tok[i],s)) return i;
@@ -402,6 +409,14 @@ static int conv_push_str(g2b_session *s, const char *txt){
   free(ids);
   return rc;
 }
+/* "rol\n" + texto en heap (antes buffers fijos de 4096/9000 B truncaban en
+ * silencio mensajes largos, a veces a mitad de un carácter UTF-8). */
+static char *cat_role(const char *role, const char *txt){
+  size_t a=strlen(role), b=strlen(txt);
+  char *o=malloc(a+b+1);
+  if(o){ memcpy(o,role,a); memcpy(o+a,txt,b+1); }
+  return o;
+}
 g2b_error g2b_chat_begin(g2b_session *s, const char *system_utf8, int no_think){
   if(!s) return G2B_ERR_IO;
   Model *m=&s->m;
@@ -435,11 +450,11 @@ g2b_error g2b_chat_begin(g2b_session *s, const char *system_utf8, int no_think){
          ||conv_push_str(s,"\n\n")||conv_push_str(s,system_utf8)||conv_push(s,s->eot))
         return G2B_ERR_OOM;
     } else {
-      char sbuf[4096];
-      snprintf(sbuf,sizeof sbuf,"system\n%s",system_utf8);
-      if(conv_push(s,s->im_start)||conv_push_str(s,sbuf)||conv_push(s,s->im_end)
-         ||conv_push_str(s,"\n"))
-        return G2B_ERR_OOM;
+      char *sbuf=cat_role("system\n",system_utf8);
+      int bad=!sbuf||conv_push(s,s->im_start)||conv_push_str(s,sbuf)||conv_push(s,s->im_end)
+         ||conv_push_str(s,"\n");
+      free(sbuf);
+      if(bad) return G2B_ERR_OOM;
     }
   }
   s->sys_len=s->cn;
@@ -465,10 +480,11 @@ g2b_error g2b_chat_turn(g2b_session *s, const char *user_utf8,
        ||conv_push_str(s,"\n\n"))
       return G2B_ERR_OOM;
   } else {
-    char ub[9000]; snprintf(ub,sizeof ub,"user\n%s",user_utf8);
-    if(conv_push(s,s->im_start)||conv_push_str(s,ub)||conv_push(s,s->im_end)
-       ||conv_push_str(s,"\n")||conv_push(s,s->im_start)||conv_push_str(s,"assistant\n"))
-      return G2B_ERR_OOM;
+    char *ub=cat_role("user\n",user_utf8);
+    int bad=!ub||conv_push(s,s->im_start)||conv_push_str(s,ub)||conv_push(s,s->im_end)
+       ||conv_push_str(s,"\n")||conv_push(s,s->im_start)||conv_push_str(s,"assistant\n");
+    free(ub);
+    if(bad) return G2B_ERR_OOM;
     if(s->no_think && s->think_start>=0 && s->think_end>=0){
       if(conv_push(s,s->think_start)||conv_push_str(s,"\n\n")
          ||conv_push(s,s->think_end)||conv_push_str(s,"\n\n"))
@@ -609,10 +625,10 @@ g2b_error g2b_pack(const char *gguf, const char *out, const g2b_pack_opts *o){
   if(!gguf || !out) return G2B_ERR_IO;
   int downq4=0; float prune=0.f; const char *calib=NULL; int oq=0;
   if(o){ downq4=o->downquant; prune=o->prune; calib=o->calib_path; oq=o->out_quant; }
-  if(oq==1) g2bx_set_q4s(1);
-  else if(oq==2) g2bx_set_q4s_psy(1);
-  else if(oq==3) g2bx_set_q4vvc(1);
   if(prune>0.f && (prune<=0.001f||prune>=0.9f)) return G2B_ERR_CONTEXT;
+  /* flags globales del packer: fijar los tres en cada llamada (antes un pack
+   * Q4_0S dejaba Q4_0S activo para los siguientes g2b_pack del proceso) */
+  g2bx_set_q4s(oq==1); g2bx_set_q4s_psy(oq==2); g2bx_set_q4vvc(oq==3);
   if(prune<=0.f) return g2bx_pack_prune(gguf,out,downq4,0.f)?G2B_ERR_FORMAT:G2B_OK;
   /* dos fases: pack completo -> calibrar -> repack podado */
   char tmp[1280];

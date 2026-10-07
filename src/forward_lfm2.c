@@ -14,6 +14,7 @@ void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   if(group<1) group=1;
   if(ctx<=0) ctx=c->seq_len;
   if(pos<0||pos>=ctx||token<0||token>=c->vocab||!m->buf) return;
+  if(pos==0) rt_reset_state(m); /* secuencia nueva: conv state limpio */
 
   FwdScratch _sc; fwd_scratch_dense(m,&_sc);
   f32 *x=_sc.x, *xb=_sc.xb, *xb2=_sc.xb2, *hb=_sc.hb, *hb2=_sc.hb2;

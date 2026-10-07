@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* fmemopen (fuzz_mem.h); antes de cualquier include */
 /* fuzz_gguf.c — LibFuzzer: gguf_load_mem + gguf_free (parser GGUF).
  * Compilar (CI): clang -fsanitize=fuzzer,address -Iinclude -Isrc ...
  * Local sin libFuzzer: -DFUZZ_STANDALONE + lista de archivos.

@@ -66,6 +66,18 @@ int cyber_save_lora(Model *m, const char *path){
  }
  fclose(f); fprintf(stderr,"lora: saved v2 %s r=%d\n",path,m->lora_r); return 0;
 }
+static void lora_free(Model *m){
+ if(!m->lora_r) return;
+ f32 **arr[]={m->loraA_q,m->loraB_q,m->loraA_v,m->loraB_v,m->loraA_gate,m->loraB_gate,
+              m->loraM_q,m->loraM_v,m->loraM_gate,m->galore_m,m->galore_v};
+ for(size_t a=0;a<sizeof arr/sizeof arr[0];a++)
+  if(arr[a]) for(int L=0; L<m->c.n_layers; L++) free(arr[a][L]); /* alloc parcial: NULL ok */
+ free(m->loraA_q); free(m->loraB_q); free(m->loraA_v); free(m->loraB_v); free(m->loraA_gate); free(m->loraB_gate); free(m->loraM_q); free(m->loraM_v); free(m->loraM_gate); free(m->galore_m); free(m->galore_v);
+ m->loraA_q=m->loraB_q=m->loraA_v=m->loraB_v=m->loraA_gate=m->loraB_gate=NULL;
+ m->loraM_q=m->loraM_v=m->loraM_gate=m->galore_m=m->galore_v=NULL;
+ m->lora_r=0;
+}
+static int rdf(f32 *p, size_t n, FILE *f){ return p && fread(p,4,n,f)==n ? 0 : -1; }
 int cyber_load_lora(Model *m, const char *path){
  FILE *f=fopen(path,"rb"); if(!f) return -1;
  int ver, r, L;
@@ -73,22 +85,25 @@ int cyber_load_lora(Model *m, const char *path){
  if(ver==2){ if(fread(&r,4,1,f)!=1 || fread(&L,4,1,f)!=1){ fclose(f); return -1; } }
  else { r=ver; if(fread(&L,4,1,f)!=1){ fclose(f); return -1; } ver=1; }
  if(L!=m->c.n_layers){ fclose(f); return -1; }
- lora_alloc(m,r);
- for(int l=0;l<L;l++){
-  int dim=m->c.dim, hid=m->c.hidden_dim, nq=m->c.n_heads*m->c.head_dim, nkv=m->c.n_kv_heads*m->c.head_dim;
+ /* lora_add usa un tmp[128]: un rank mayor indexaría A con stride erróneo */
+ if(r<=0 || r>128){ fprintf(stderr,"lora: rank %d fuera de [1,128]\n",r); fclose(f); return -1; }
+ if(lora_alloc(m,r)){ lora_free(m); fclose(f); return -1; }
+ int bad=0;
+ for(int l=0;l<L && !bad;l++){
+  size_t dim=(size_t)m->c.dim, hid=(size_t)m->c.hidden_dim, nq=(size_t)m->c.n_heads*m->c.head_dim, nkv=(size_t)m->c.n_kv_heads*m->c.head_dim, rr=(size_t)r;
+  bad = rdf(m->loraA_q[l],dim*rr,f) || rdf(m->loraB_q[l],rr*nq,f)
+     || rdf(m->loraA_v[l],dim*rr,f) || rdf(m->loraB_v[l],rr*nkv,f)
+     || rdf(m->loraA_gate[l],dim*rr,f) || rdf(m->loraB_gate[l],rr*hid,f);
+  if(bad || !m->loraM_q[l] || !m->loraM_v[l] || !m->loraM_gate[l]){ bad=1; break; }
   if(ver==1){
-   fread(m->loraA_q[l],4,(size_t)dim*r,f); fread(m->loraB_q[l],4,(size_t)r*nq,f);
-   fread(m->loraA_v[l],4,(size_t)dim*r,f); fread(m->loraB_v[l],4,(size_t)r*nkv,f);
-   fread(m->loraA_gate[l],4,(size_t)dim*r,f); fread(m->loraB_gate[l],4,(size_t)r*hid,f);
-   for(int i=0;i<nq;i++) m->loraM_q[l][i]=1.0f;
-   for(int i=0;i<nkv;i++) m->loraM_v[l][i]=1.0f;
-   for(int i=0;i<hid;i++) m->loraM_gate[l][i]=1.0f;
+   for(size_t i=0;i<nq;i++) m->loraM_q[l][i]=1.0f;
+   for(size_t i=0;i<nkv;i++) m->loraM_v[l][i]=1.0f;
+   for(size_t i=0;i<hid;i++) m->loraM_gate[l][i]=1.0f;
   } else {
-   fread(m->loraA_q[l],4,(size_t)dim*r,f); fread(m->loraB_q[l],4,(size_t)r*nq,f);
-   fread(m->loraA_v[l],4,(size_t)dim*r,f); fread(m->loraB_v[l],4,(size_t)r*nkv,f);
-   fread(m->loraA_gate[l],4,(size_t)dim*r,f); fread(m->loraB_gate[l],4,(size_t)r*hid,f);
-   fread(m->loraM_q[l],4,(size_t)nq,f); fread(m->loraM_v[l],4,(size_t)nkv,f); fread(m->loraM_gate[l],4,(size_t)hid,f);
+   bad = rdf(m->loraM_q[l],nq,f) || rdf(m->loraM_v[l],nkv,f) || rdf(m->loraM_gate[l],hid,f);
   }
  }
- fclose(f); fprintf(stderr,"lora: loaded v%d %s r=%d\n",ver,path,r); return 0;
+ fclose(f);
+ if(bad){ fprintf(stderr,"lora: %s truncado o incompatible\n",path); lora_free(m); return -1; }
+ fprintf(stderr,"lora: loaded v%d %s r=%d\n",ver,path,r); return 0;
 }

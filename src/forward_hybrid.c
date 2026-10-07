@@ -41,6 +41,7 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   if(ctx<=0) ctx=c->seq_len;
   if(pos<0||pos>=ctx||token<0||token>=c->vocab) return -1;
   if(!m->buf||!m->ssm_st||!m->conv_state){ fprintf(stderr,"fwd: runtime not initialized\n"); return -1; }
+  if(pos==0) rt_reset_state(m); /* secuencia nueva: estado GDN/conv limpio */
   static i8 dbg_hyb=-1; if(dbg_hyb==-1){ dbg_hyb=getenv("G2BX_DBG")?1:0; }
   int _dbg_hyb = dbg_hyb;
   if(_dbg_hyb && pos<2) fprintf(stderr,"[C] forward_hybrid token %d pos %d dim %d\n", token, pos, dim);
@@ -129,7 +130,7 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
 
       Slot *wo=slot_get(m,R_ATTN_O,L);
       if(require_slot(wo,"attn_o",L)) return -1;
-      matmul_q(xb,q,slot_ptr(m,wo),wo->type,dim,dim,row);
+      matmul_q(xb,q,slot_ptr(m,wo),wo->type,nq,dim,row); /* wo: [nq -> dim] */
       for(i32 i=0;i<dim;i++) x[i]+=xb[i];
     } else {
       /* ── gated delta net ── */

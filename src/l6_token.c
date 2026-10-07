@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
-static u16 b2u[256]; static u8 u2b[289]; static int tbl_init=0;
+static u16 b2u[256]; static u8 u2b[324]; /* 256 + 68 bytes no imprimibles remapeados (0..32, 127..160, 173) */ static int tbl_init=0;
 static void tok_init_tables(void){
   /* llamada single-thread (carga de modelo); si se usa en multi-hilo agregar pthread_once */
   if(tbl_init) return; tbl_init=1;
@@ -101,10 +101,10 @@ int tok_read_section(FILE *f, Tokenizer *t){
   if(!t->vocab||!t->merges){ free(t->vocab); free(t->merges); t->vocab=t->merges=NULL; return -1; }
   u32 nv,nm; i32 b,e,u;
   if(fread(&nv,4,1,f)!=1||fread(&nm,4,1,f)!=1||fread(&b,4,1,f)!=1||fread(&e,4,1,f)!=1||fread(&u,4,1,f)!=1){ tok_free(t); return -1; }
-  if(nv>(1u<<20)||nm>(1u<<20)) return -1;
+  if(nv>(1u<<20)||nm>(1u<<20)) goto fail;
   t->n=(i32)nv; t->nmerges=(i32)nm; t->bos=b; t->eos=e; t->unk=u?u:0;
   t->tok=calloc(t->n?(size_t)t->n:1,sizeof(char*));
-  if(!t->tok) return -1;
+  if(!t->tok) goto fail;
   for(i32 i=0;i<t->n;i++){ u32 l; if(fread(&l,4,1,f)!=1||l>(1u<<20)) goto fail; char *s=malloc((size_t)l+1); if(!s) goto fail; if(fread(s,1,l,f)!=l){ free(s); goto fail; } s[l]=0; t->tok[i]=s; }
   t->mergestr=calloc(t->nmerges?(size_t)t->nmerges:1,sizeof(char*));
   if(!t->mergestr) goto fail;
@@ -161,7 +161,7 @@ char *tok_decode(Tokenizer *t, const i32 *ids, i32 n){
     if(c<0x80){ cp=c; adv=1; }
     else if((c&0xE0)==0xC0 && i+1<len){ cp=((c&0x1F)<<6)|((u8)out[i+1]&0x3F); adv=2; }
     else if((c&0xF0)==0xE0 && i+2<len){ cp=((c&0x0F)<<12)|(((u8)out[i+1]&0x3F)<<6)|((u8)out[i+2]&0x3F); adv=3; }
-    else { cp=c; adv=1; } i+=adv; u8 b = (cp<=288)? u2b[cp] : (u8)cp; if(rl+1>=bcap){ bcap*=2; char *tmp=realloc(res,bcap); if(!tmp){ free(res); free(out); return NULL; } res=tmp; } res[rl++]=(char)b; }
+    else { cp=c; adv=1; } i+=adv; u8 b = (cp<324)? u2b[cp] : (u8)cp; if(rl+1>=bcap){ bcap*=2; char *tmp=realloc(res,bcap); if(!tmp){ free(res); free(out); return NULL; } res=tmp; } res[rl++]=(char)b; }
   res[rl]=0; free(out); return res;
 }
 i32 tok_id(Tokenizer *t, const char *s){ return shash_get(t->vocab, s); }

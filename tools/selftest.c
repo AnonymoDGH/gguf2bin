@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 static int fails=0;
 #define CHECK(c,msg) do{ if(!(c)){ fprintf(stderr,"selftest FAIL: %s (linea %d)\n",msg,__LINE__); fails++; } }while(0)
@@ -269,6 +270,127 @@ static void t_dispatch(void){
 #endif
 }
 
+/* Tokenizer byte-level: vocab = los 256 bytes (mapeo GPT-2 calculado aquí,
+ * independiente de l6_token.c), sin merges. encode→decode debe devolver los
+ * mismos bytes. Antes: u2b[289] desbordaba y 0x7F..0xA0/0xAD decodificaban
+ * mal (€, à, emojis). */
+static int cp_utf8(unsigned cp, char *o){
+  if(cp<0x80){ o[0]=(char)cp; return 1; }
+  o[0]=(char)(0xC0|(cp>>6)); o[1]=(char)(0x80|(cp&0x3F)); return 2;
+}
+static void t_tokenizer(const char *tmp){
+  char tp[1024]; snprintf(tp,sizeof tp,"%s/selftest_tok.bin",tmp);
+  FILE *o=fopen(tp,"w+b");
+  CHECK(o!=NULL,"tok open");
+  if(!o) return;
+  u32 nv=256, nm=0; i32 bos=-1, eos=-1, unk=0;
+  fwrite(&nv,4,1,o); fwrite(&nm,4,1,o); fwrite(&bos,4,1,o); fwrite(&eos,4,1,o); fwrite(&unk,4,1,o);
+  unsigned n=0;
+  for(int b=0;b<256;b++){
+    int printable=(b>=33&&b<=126)||(b>=161&&b<=172)||(b>=174&&b<=255);
+    unsigned cp=printable?(unsigned)b:256u+n++;
+    char s[4]; u32 l=(u32)cp_utf8(cp,s);
+    fwrite(&l,4,1,o); fwrite(s,1,l,o);
+  }
+  CHECK(fseek(o,0,SEEK_SET)==0,"tok rewind");
+  Tokenizer *t=malloc(sizeof *t);
+  CHECK(t && tok_read_section(o,t)==0,"tok_read_section");
+  fclose(o); os_unlink(tp);
+  if(!t) return;
+  const char *txt="a \xE2\x82\xAC \xC3\xA0 \xF0\x9F\x99\x82 \x7F\x01\xAD\x80\xA0 fin";
+  i32 *ids=NULL; i32 ni=tok_encode(t,txt,&ids);
+  CHECK(ni==(i32)strlen(txt),"tok 1 id por byte sin merges");
+  char *back=ni>0?tok_decode(t,ids,ni):NULL;
+  CHECK(back && !strcmp(back,txt),"tok round-trip bytes 0x7F..0xA0/0xAD");
+  free(back); free(ids);
+  tok_free(t); free(t);
+}
+
+/* Kernels Q4_0S / Q4_0S_PSY (decode y batched) contra gguf_dequant + dot.
+ * q4bcheck solo compara batched vs decode: un error compartido (PSY leía los
+ * nibbles 2 bytes desplazados) pasaba. */
+static void t_kernels_ref(void){
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  struct { u32 ty; u32 bpsb; qmat_dec_fn dec; qmat_bat_fn bat; const char *nm; } k[] = {
+    {T_Q4_0S, 130, matmul_q4_0s, matmul_q4_0s_b, "Q4_0S"},
+    {T_Q4_0S_PSY, 132, matmul_q4_0s_psy, matmul_q4_0s_psy_b, "Q4_0S_PSY"},
+  };
+  enum { N=512, D=6, B=3 };
+  for(unsigned ki=0;ki<sizeof k/sizeof k[0];ki++){
+    size_t rs=(size_t)(N/256)*k[ki].bpsb;
+    u8 *w=malloc(rs*D);
+    f32 *x=malloc(sizeof(f32)*N*B), *ref=malloc(sizeof(f32)*D*B);
+    f32 *od=malloc(sizeof(f32)*D*B), *ob=malloc(sizeof(f32)*D*B), *row=malloc(sizeof(f32)*N);
+    if(!w||!x||!ref||!od||!ob||!row){ CHECK(0,"kernels_ref OOM"); }
+    else {
+      u32 s=12345u;
+      for(size_t i=0;i<rs*D;i++){ s=s*1103515245u+12345u; w[i]=(u8)(s>>16); }
+      for(size_t sb=0;sb<(size_t)D*(N/256);sb++){ /* escalas finitas */
+        u16 h0=f32_to_half(0.01f+0.001f*(f32)(sb%7)), h1=f32_to_half(0.02f+0.001f*(f32)(sb%5));
+        memcpy(w+sb*k[ki].bpsb,&h0,2);
+        if(k[ki].ty==T_Q4_0S_PSY) memcpy(w+sb*k[ki].bpsb+2,&h1,2);
+      }
+      for(int i=0;i<N*B;i++){ s=s*1103515245u+12345u; x[i]=(f32)((s>>8)&0xffff)/32768.f-1.f; }
+      for(int t=0;t<B;t++) for(int r=0;r<D;r++){
+        gguf_dequant(k[ki].ty,w+(size_t)r*rs,row,N);
+        double acc=0; for(int j=0;j<N;j++) acc+=(double)row[j]*x[(size_t)t*N+j];
+        ref[(size_t)t*D+r]=(f32)acc;
+      }
+      for(int t=0;t<B;t++) k[ki].dec(od+(size_t)t*D,x+(size_t)t*N,w,N,D);
+      k[ki].bat(ob,x,w,N,D,B);
+      double md=0, mb=0, mref=0;
+      for(int i=0;i<D*B;i++){
+        double a=fabs((double)ref[i]); if(a>mref) mref=a;
+        double e1=fabs((double)od[i]-ref[i]), e2=fabs((double)ob[i]-ref[i]);
+        if(e1>md) md=e1;
+        if(e2>mb) mb=e2;
+      }
+      /* activación cuantizada a Q8: error relativo a max|ref| ~1e-2 */
+      char msg[96];
+      snprintf(msg,sizeof msg,"%s decode vs dequant (err %.3g / %.3g)",k[ki].nm,md,mref);
+      CHECK(md<=0.02*mref+1e-3,msg);
+      snprintf(msg,sizeof msg,"%s batched vs dequant (err %.3g / %.3g)",k[ki].nm,mb,mref);
+      CHECK(mb<=0.02*mref+1e-3,msg);
+    }
+    free(w); free(x); free(ref); free(od); free(ob); free(row);
+  }
+#endif
+}
+
+/* Slot más pequeño que su geometría (tok_embd de 18 B para vocab×dim) debe
+ * rechazarse en carga: antes el forward leía fuera del slot. */
+static void t_slot_validate(const char *model, const char *tmp){
+  FILE *f=fopen(model,"rb");
+  G2bxHeader h;
+  CHECK(f && g2bx_read_header(f,&h)==0,"validate read");
+  if(f) fclose(f);
+  if(!h.slots) return;
+  char tp[1024]; snprintf(tp,sizeof tp,"%s/selftest_small.g2bx",tmp);
+  for(int pass=0;pass<2;pass++){
+    for(u32 i=0;i<h.n_slots;i++)
+      if(pass==1 && h.slots[i].role==R_TOK_EMBD) h.slots[i].nbytes=18;
+    u8 **ptrs=calloc(h.n_slots,sizeof(u8*)); u32 *szs=calloc(h.n_slots,sizeof(u32));
+    FILE *o=fopen(tp,"w+b");
+    int rc=(!ptrs||!szs||!o)?-1:0;
+    for(u32 i=0;i<h.n_slots && !rc;i++){ szs[i]=h.slots[i].nbytes; ptrs[i]=calloc(1,szs[i]?szs[i]:1); if(!ptrs[i]) rc=-1; }
+    if(!rc){
+      u64 ds=g2bx_layout_slots(h.slots,h.n_slots);
+      rc=g2bx_write_header(o,h.arch,h.flags,&h.cfg,h.slots,h.n_slots)
+       || g2bx_write_blob(o,h.slots,h.n_slots,ptrs,szs,ds) || g2bx_write_footer(o);
+    }
+    if(o) fclose(o);
+    for(u32 i=0;ptrs && i<h.n_slots;i++) free(ptrs[i]);
+    free(ptrs); free(szs);
+    CHECK(rc==0,"validate write");
+    Model m;
+    int lr=model_load_g2bx(tp,&m);
+    if(pass==0){ CHECK(lr==0,"validate: copia íntegra carga"); if(!lr) model_free(&m); }
+    else CHECK(lr!=0,"validate: slot truncado rechazado");
+    os_unlink(tp);
+  }
+  g2bx_header_free(&h);
+}
+
 static void t_opts(void){  OptsCommon o; opts_common_init(&o);
   char *av[]={"prog","-c","512","--threads","4","--q8-kv","--fast",
               "--max-ram","2048","--swap","--seed","7","--drop","2",
@@ -309,6 +431,9 @@ int main(int argc, char **argv){
   t_g2bx(argv[1],tmp);
   t_g2bx_v3(tmp);
   t_dispatch();
+  t_tokenizer(tmp);
+  t_kernels_ref();
+  t_slot_validate(argv[1],tmp);
   t_opts();
   if(fails){ fprintf(stderr,"selftest: %d FALLOS\n",fails); return 1; }
   printf("selftest: OK\n");
