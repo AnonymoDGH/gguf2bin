@@ -17,9 +17,56 @@ typedef struct {
   Model m;
   volatile int live;
   volatile int cancel;
+  int busy;            /* generate() en curso: freeModel espera (bajo g_mu) */
 } JModel;
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_idle = PTHREAD_COND_INITIALIZER;
+
+/* Llamar con g_mu tomado. */
+static void gen_end_locked(JModel *j){ j->busy = 0; pthread_cond_broadcast(&g_idle); }
+
+/* ── UTF-8 → jstring ──
+ * NewStringUTF exige Modified UTF-8: un token BPE suele cortar un carácter
+ * multibyte (bytes sueltos) y los emojis son de 4 bytes; ambos abortan con
+ * CheckJNI o salen corruptos. Se decodifica a UTF-16 (inválido → U+FFFD). */
+static jstring utf8_to_jstring(JNIEnv *env, const char *s, size_t n){
+  jchar *u = (jchar *)malloc((n ? n : 1) * 2 * sizeof(jchar));
+  if (!u) return NULL;
+  size_t k = 0, i = 0;
+  while (i < n) {
+    unsigned c = (unsigned char)s[i], cp, need;
+    if (c < 0x80) { cp = c; need = 0; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; need = 1; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; need = 2; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; need = 3; }
+    else { u[k++] = 0xFFFD; i++; continue; }
+    if (need && i + need >= n) { u[k++] = 0xFFFD; break; } /* truncada */
+    size_t t;
+    for (t = 1; t <= need; t++) {
+      unsigned cc = (unsigned char)s[i + t];
+      if ((cc & 0xC0) != 0x80) break;
+      cp = (cp << 6) | (cc & 0x3F);
+    }
+    if (t <= need) { u[k++] = 0xFFFD; i += t; continue; }
+    i += need + 1;
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+    if (cp >= 0x10000) { cp -= 0x10000; u[k++] = (jchar)(0xD800 | (cp >> 10)); u[k++] = (jchar)(0xDC00 | (cp & 0x3FF)); }
+    else u[k++] = (jchar)cp;
+  }
+  jstring r = (*env)->NewString(env, u, (jsize)k);
+  free(u);
+  return r;
+}
+/* Longitud del prefijo sin una secuencia UTF-8 incompleta al final. */
+static size_t utf8_complete_prefix(const char *s, size_t n){
+  size_t back = 0;
+  while (back < 3 && back < n && ((unsigned char)s[n - 1 - back] & 0xC0) == 0x80) back++;
+  if (back == n) return n;
+  unsigned c = (unsigned char)s[n - 1 - back];
+  size_t want = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+  return (want > back + 1 && want <= 4) ? n - 1 - back : n;
+}
 
 static u64 jrng = 0x9E3779B97F4A7C15ull;
 static f32 jrandf(void){
@@ -107,6 +154,9 @@ Java_com_gguf2bin_app_Native_freeModel(JNIEnv *env, jclass cl, jlong ptr) {
   if (!j) return;
   j->cancel = 1;
   pthread_mutex_lock(&g_mu);
+  /* onDestroy hace join(2000) y luego llega aquí: si generate() sigue vivo
+   * (prefill largo), liberar j ahora sería use-after-free en su bucle. */
+  while (j->busy) pthread_cond_wait(&g_idle, &g_mu);
   if (j->live) { model_free(&j->m); j->live = 0; }
   pthread_mutex_unlock(&g_mu);
   free(j);
@@ -139,13 +189,14 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
 
   pthread_mutex_lock(&g_mu);
   if (!j->live || j->cancel || !j->m.tok) { pthread_mutex_unlock(&g_mu); return NULL; }
+  j->busy = 1;
   Model *m = &j->m;
 
   const char *ptext = (*env)->GetStringUTFChars(env, prompt, NULL);
   i32 *ids = NULL;
   i32 nt = tok_encode(m->tok, (char *)ptext, &ids);
   (*env)->ReleaseStringUTFChars(env, prompt, ptext);
-  if (nt <= 0) { free(ids); pthread_mutex_unlock(&g_mu); return NULL; }
+  if (nt <= 0) { free(ids); gen_end_locked(j); pthread_mutex_unlock(&g_mu); return NULL; }
 
   if (m->tok->bos >= 0 && ids[0] != m->tok->bos) {
     i32 *tmp = (i32 *)malloc((size_t)(nt + 1) * sizeof(i32));
@@ -159,7 +210,7 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
   char *out = NULL; size_t cap = 8192, len = 0;
   if (!logits || !recent || !(out=(char*)malloc(cap))) {
     free(logits); free(recent); free(ids); free(out);
-    pthread_mutex_unlock(&g_mu); return NULL;
+    gen_end_locked(j); pthread_mutex_unlock(&g_mu); return NULL;
   }
   out[0]=0;
 
@@ -188,6 +239,7 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
   pthread_mutex_unlock(&g_mu);
 
   jstring result = NULL;
+  char pend[8]; size_t pn = 0; /* bytes de un carácter UTF-8 aún incompleto */
   for (i32 k = 0; k < maxTokens; k++) {
     pthread_mutex_lock(&g_mu);
     if (!j->live || j->cancel || pos >= maxctx) { pthread_mutex_unlock(&g_mu); break; }
@@ -205,12 +257,27 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
       out = tmp; cap = ncap;
     }
     memcpy(out + len, piece, plen); len += plen; out[len] = 0;
-    jstring jp = (*env)->NewStringUTF(env, piece);
+    /* emitir solo caracteres completos; el resto espera al siguiente token */
+    size_t cn = pn + plen;
+    char *cat = (char *)malloc(cn ? cn : 1);
+    jstring jp = NULL;
+    if (cat) {
+      memcpy(cat, pend, pn); memcpy(cat + pn, piece, plen);
+      size_t emit = utf8_complete_prefix(cat, cn);
+      pn = cn - emit; if (pn > sizeof pend) pn = 0;
+      memcpy(pend, cat + emit, pn);
+      if (emit) jp = utf8_to_jstring(env, cat, emit);
+      free(cat);
+    }
     free(piece);
     if (jp) {
       (*env)->CallVoidMethod(env, sink, on_token, jp);
       (*env)->DeleteLocalRef(env, jp);
-      if ((*env)->ExceptionCheck(env)) { free(out); free(logits); free(ids); free(recent); return NULL; }
+      if ((*env)->ExceptionCheck(env)) {
+        free(out); free(logits); free(ids); free(recent);
+        pthread_mutex_lock(&g_mu); gen_end_locked(j); pthread_mutex_unlock(&g_mu);
+        return NULL;
+      }
     }
     pthread_mutex_lock(&g_mu);
     if (!j->live || j->cancel) { pthread_mutex_unlock(&g_mu); break; }
@@ -218,7 +285,8 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
     pos++;
     pthread_mutex_unlock(&g_mu);
   }
-  result = (*env)->NewStringUTF(env, out);
+  pthread_mutex_lock(&g_mu); gen_end_locked(j); pthread_mutex_unlock(&g_mu);
+  result = utf8_to_jstring(env, out, len);
 
   free(out); free(logits); free(ids); free(recent);
   return result;

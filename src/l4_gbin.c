@@ -150,6 +150,17 @@ static int is_weight_role(u8 role){
     case R_CONV_IN: case R_CONV_OUT:
     case R_ATTN_QKV: case R_ATTN_GATE: case R_SSM_OUT: return 1; default: return 0; }
 }
+/* Longitud de fila (ne0) de un peso por rol: los kernels de bloque exigen
+ * fila % bloque == 0, no basta con que el TOTAL lo sea (dim=896/576 con
+ * bloques de 256 cortaba superbloques entre filas). */
+static u64 weight_row_len(u8 role, const ModelCfg *c){
+  switch(role){
+    case R_FFN_DOWN: return (u64)c->hidden_dim;
+    case R_ATTN_O: return (u64)c->n_heads*(u64)c->head_dim;
+    case R_SSM_OUT: return (u64)c->ssm_inner;
+    default: return (u64)c->dim;
+  }
+}
 static void quant_block_q4_0(const f32 *x, u8 *dst){
   f32 amax=0; for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax) amax=a; } f32 d=amax/7.0f; if(d<=0) d=1e-9f; u16 sd=f32_to_half(d); memcpy(dst,&sd,2);
   for(int j=0;j<16;j++){ int q0=(int)lroundf(x[j]/d)+8; int q1=(int)lroundf(x[j+16]/d)+8; if(q0<0)q0=0; else if(q0>15)q0=15; if(q1<0)q1=0; else if(q1>15)q1=15; dst[2+j]=(u8)(q0|(q1<<4)); }
@@ -300,7 +311,13 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       fprintf(stderr,"g2bx: type %u unsupported in tensor %s (skipped)\n", ty, g.t[i].name);
       skipped_type++; continue;
     }
-    u64 ne=ne_of(&g.t[i]); u32 nbytes=(u32)ggml_type_size(g.t[i].type,ne);
+    u64 ne=ne_of(&g.t[i]); u64 nbytes64=ggml_type_size(g.t[i].type,ne);
+    if(nbytes64>UINT32_MAX){ /* Slot.nbytes es u32 (SPEC §3): truncar corrompería el archivo */
+      fprintf(stderr,"g2bx: tensor %s is %llu bytes (>4 GB, unsupported by G2BX slots)\n",
+        g.t[i].name,(unsigned long long)nbytes64);
+      free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1;
+    }
+    u32 nbytes=(u32)nbytes64;
     u8 *tp=gguf_tensor_ptr(&g,&g.t[i]);
     if(!tp){ fprintf(stderr,"g2bx: tensor %s outside file (skipped)\n", g.t[i].name); skipped_type++; continue; }
     slots[ns].role=role; slots[ns].layer=layer; slots[ns].type=(u8)g.t[i].type; slots[ns].nbytes=nbytes;
@@ -353,7 +370,7 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           fprintf(stderr,"prune: LFM2 needs hidden>=3*dim (%d); prune disabled\n",3*dim);
           prune=0.f; free(kept); free(grow); free(urw); free(bscore); free(order); goto skip_prune;
         }
-        u64 old_bytes=0,new_bytes=0;
+        u64 old_bytes=0,new_bytes=0; int prune_oom=0;
         for(i32 L=0;L<c.n_layers;L++){
           Slot *sg=NULL,*su=NULL,*sd=NULL;
           for(u32 i=0;i<ns;i++){
@@ -372,7 +389,11 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           const u8 *gp=src_ptr[ig], *up=src_ptr[iu], *dp=src_ptr[id_];
           u32 tg=sg->type, tu=su->type, td=sd->type;
           size_t grs=ggml_type_size(tg,(u64)dim), urs=ggml_type_size(tu,(u64)dim);
-          size_t drs_old=ggml_type_size(td,(u64)hidden), drb=ggml_type_bytes(td);
+          size_t drs_old=ggml_type_size(td,(u64)hidden);
+          /* bytes de un grupo de G neuronas en una fila de down: G es múltiplo del
+           * bloque de td (G = mayor block_size), pero td puede tener bloque menor
+           * (F16/F32 = 1, Q8_0 = 32 con G = 256): no asumir 1 bloque por grupo. */
+          size_t dgb=ggml_type_size(td,(u64)G);
           /* scoring: activaciones calibradas (preferente) o proxy de pesos */
           if(calib){
             for(u32 k=0;k<nblk_total;k++){
@@ -405,8 +426,8 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           for(u32 k=0;k<keep;k++){ u32 blk=order[k]; for(u32 j=0;j<G;j++) kept[blk*G+j]=1; }
           /* rebuild gate/up: copia de runs de filas */
           u8 *ng=malloc((size_t)new_hidden*grs), *nu=malloc((size_t)new_hidden*urs);
-          u8 *nd=malloc((size_t)dim*(size_t)new_hidden/G*drb);
-          if(!ng||!nu||!nd){ fprintf(stderr,"prune: OOM in layer %d\n",L); free(ng);free(nu);free(nd); break; }
+          u8 *nd=malloc((size_t)dim*(size_t)keep*dgb);
+          if(!ng||!nu||!nd){ fprintf(stderr,"prune: OOM in layer %d\n",L); free(ng);free(nu);free(nd); prune_oom=1; break; }
           /* gate/up: las filas kept se copian por runs contiguos */
           { u32 i=0; u32 dst=0;
             while(i<(u32)hidden){
@@ -422,9 +443,9 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           { u32 nb_in=(u32)hidden/G;
             for(i32 r=0;r<dim;r++){
               const u8 *srow=dp+(size_t)r*drs_old;
-              u8 *drow=nd+(size_t)r*((size_t)keep*drb);
+              u8 *drow=nd+(size_t)r*((size_t)keep*dgb);
               u32 dst=0;
-              for(u32 k=0;k<nb_in;k++) if(kept[(size_t)k*G]) { memcpy(drow+(size_t)dst*drb, srow+(size_t)k*drb, drb); dst++; }
+              for(u32 k=0;k<nb_in;k++) if(kept[(size_t)k*G]) { memcpy(drow+(size_t)dst*dgb, srow+(size_t)k*dgb, dgb); dst++; }
             }
           }
           conv_ptr[ig]=ng; src_ptr[ig]=ng; src_sz[ig]=(u32)((size_t)new_hidden*grs);
@@ -433,11 +454,16 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
           conv_ptr[iu]=nu; src_ptr[iu]=nu; src_sz[iu]=(u32)((size_t)new_hidden*urs);
           ne_arr[iu]=(u64)new_hidden*(u64)dim;
           su->nbytes=src_sz[iu];
-          conv_ptr[id_]=nd; src_ptr[id_]=nd; src_sz[id_]=(u32)((size_t)dim*(size_t)new_hidden/G*drb);
+          conv_ptr[id_]=nd; src_ptr[id_]=nd; src_sz[id_]=(u32)((size_t)dim*(size_t)keep*dgb);
           ne_arr[id_]=(u64)dim*(u64)new_hidden;
           sd->nbytes=src_sz[id_];
           old_bytes+=grs*(size_t)hidden+urs*(size_t)hidden+drs_old*(size_t)dim;
-          new_bytes+=grs*(size_t)new_hidden+urs*(size_t)new_hidden+(size_t)dim*(size_t)new_hidden/G*drb;
+          new_bytes+=grs*(size_t)new_hidden+urs*(size_t)new_hidden+(size_t)dim*(size_t)keep*dgb;
+        }
+        if(prune_oom){ /* capas a medias + hidden_dim global = archivo incoherente: abortar */
+          free(kept); free(grow); free(urw); free(bscore); free(order);
+          for(u32 i=0;i<ns;i++) free(conv_ptr[i]);
+          free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1;
         }
         c.hidden_dim=new_hidden;
         fprintf(stderr,"prune: FFN %d -> %d (-%.0f%%): weights %.0f MB -> %.0f MB\n",
@@ -451,21 +477,23 @@ skip_prune:
   /* F32/F16->Q4_0; --q4 convierte todos los pesos al kernel SIMD. */
   for(u32 i=0;i<ns;i++){
     int conv = 0;
+    u64 rl=weight_row_len(slots[i].role,&c);
+    int rows256 = rl && rl%256==0 && ne_arr[i]%256==0;
     if(is_weight_role(slots[i].role)){
       if(slots[i].type==T_F32 || slots[i].type==T_F16) conv = 1;
       else if(downq4 && slots[i].type!=T_Q4_0) conv = 1;
     }
-    if(g_force_q4vvc && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_VVC && ne_arr[i]%256==0){
+    if(g_force_q4vvc && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_VVC && rows256){
       u8 *qv=convert_tensor_q4_vvc(src_ptr[i], slots[i].type, ne_arr[i]);
       if(qv){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qv; src_ptr[i]=qv; slots[i].type=T_Q4_VVC; slots[i].nbytes=(u32)(ne_arr[i]/256*98); src_sz[i]=slots[i].nbytes; }
-    } else if(g_force_q4s_psy && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S_PSY && ne_arr[i]%256==0){
+    } else if(g_force_q4s_psy && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S_PSY && rows256){
       u8 *qs=convert_tensor_q4_0s_psy(src_ptr[i], slots[i].type, ne_arr[i]);
       if(qs){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S_PSY; slots[i].nbytes=(u32)(ne_arr[i]/256*132); src_sz[i]=slots[i].nbytes; }
-    } else if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && ne_arr[i]%256==0){
+    } else if(g_force_q4s && is_weight_role(slots[i].role) && slots[i].type!=T_Q4_0S && rows256){
       u8 *qs=convert_tensor_q4_0s(src_ptr[i], slots[i].type, ne_arr[i]);
       if(qs){ if(conv_ptr[i]) free(conv_ptr[i]); conv_ptr[i]=qs; src_ptr[i]=qs; slots[i].type=T_Q4_0S; slots[i].nbytes=(u32)(ne_arr[i]/256*130); src_sz[i]=slots[i].nbytes; }
     }
-    if(conv && slots[i].type!=T_Q4_0S && slots[i].type!=T_Q4_0S_PSY && slots[i].type!=T_Q4_VVC){
+    if(conv && rl%32==0 && slots[i].type!=T_Q4_0S && slots[i].type!=T_Q4_0S_PSY && slots[i].type!=T_Q4_VVC){
       u8 *q4=convert_tensor_q4_0(src_ptr[i], slots[i].type, ne_arr[i]);
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }

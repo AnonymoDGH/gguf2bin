@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 /* os_mm.c — mmap + ficheros 64-bit unificados Win32/POSIX (Fase 2).
  * Los 3 mapeos del proyecto (GGUF, blob G2BX, swap KV) y las lecturas
  * completas de fichero pasan por aquí; fuera no hay ni un #ifdef de SO.
@@ -68,7 +70,12 @@ int os_map_rw_new(const char *path, size_t bytes, OsMap *m){
   m->view=v; m->size=bytes;
   return 0;
 #else
-  int fd=open(path,O_RDWR|O_CREAT|O_TRUNC,0600);
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+  /* O_NOFOLLOW: en un directorio compartido (/tmp) un symlink plantado no
+   * redirige el O_TRUNC hacia un archivo ajeno */
+  int fd=open(path,O_RDWR|O_CREAT|O_TRUNC|O_NOFOLLOW,0600);
   if(fd<0) return -1;
   if(ftruncate(fd,(off_t)bytes)){ close(fd); return -1; }
   void *v=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);

@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* fmemopen (fuzz_mem.h); antes de cualquier include */
 /* fuzz_tok.c — LibFuzzer: tok_read_section (tokenizer serializado).
  * OJO ownership: tok_read_section libera internals al fallar; el llamador
  * solo libera el struct (igual que model.c). En éxito, tok_free completo.

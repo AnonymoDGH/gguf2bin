@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 /* model.c — carga/libera G2BX, geometría, RAM, calibración, synth (split de l5, Fase 3) */
 #include "internal/g2b.h"
 #include "internal/g2bx_io.h"
@@ -29,6 +31,93 @@ static void build_index(Model *m){
     if(s->layer==0xFFFF) m->ix_global[s->role]=s;
     else if(s->layer<m->c.n_layers) m->ix_layer[s->layer][s->role]=s;
   }
+}
+
+/* Elementos que el forward leerá de un slot (ne) y longitud de fila (rl, debe
+ * ser múltiplo del bloque del tipo). 0 = rol no leído en esta arch/capa. */
+static int slot_need(const Model *m, const Slot *s, u64 *ne, u64 *rl){
+  const ModelCfg *c=&m->c;
+  u64 dim=(u64)c->dim, hid=(u64)c->hidden_dim, hd=(u64)c->head_dim, voc=(u64)c->vocab;
+  u64 nq=(u64)c->n_heads*hd, nkv=(u64)c->n_kv_heads*hd;
+  int glob=(s->layer==0xFFFF);
+  int L=glob?-1:(int)s->layer;
+  /* capa de atención: densos siempre; LFM2 si tiene Q; qwen35 cada fa_interval */
+  int attn=1;
+  if(!glob && m->arch==ARCH_LFM2) attn=m->ix_layer[L][R_ATTN_Q]!=NULL;
+  if(!glob && m->arch==ARCH_QWEN35) attn=((L+1)%c->fa_interval)==0;
+  u64 inner=(u64)c->ssm_inner, nv=(u64)c->ssm_dt_rank;
+  u64 conv_dim=inner+2u*(u64)c->ssm_n_group*(u64)c->ssm_d_state;
+  *rl=dim;
+  switch(s->role){
+    case R_TOK_EMBD: case R_OUTPUT: if(!glob) return 0; *ne=voc*dim; return 1;
+    case R_OUT_NORM: case R_EMBD_NORM: if(!glob) return 0; *ne=dim; return 1;
+    case R_ATTN_NORM: case R_FFN_NORM: if(glob) return 0; *ne=dim; return 1;
+    case R_FFN_GATE: case R_FFN_UP: if(glob) return 0; *ne=hid*dim; return 1;
+    case R_FFN_DOWN: if(glob) return 0; *ne=dim*hid; *rl=hid; return 1;
+  }
+  if(glob) return 0;
+  if(attn){
+    switch(s->role){
+      case R_ATTN_Q: *ne=(m->arch==ARCH_QWEN35?2u:1u)*nq*dim; return 1;
+      case R_ATTN_K: case R_ATTN_V: *ne=nkv*dim; return 1;
+      case R_ATTN_O: *ne=dim*nq; *rl=nq; return 1;
+      case R_ATTN_Q_NORM: case R_ATTN_K_NORM: *ne=hd; *rl=hd; return 1;
+      case R_ATTN_Q_BIAS: if(m->arch==ARCH_QWEN35) return 0; *ne=nq; *rl=nq; return 1;
+      case R_ATTN_K_BIAS: case R_ATTN_V_BIAS: if(m->arch==ARCH_QWEN35) return 0; *ne=nkv; *rl=nkv; return 1;
+    }
+    return 0;
+  }
+  if(m->arch==ARCH_LFM2){
+    switch(s->role){
+      case R_CONV_IN: *ne=3u*dim*dim; return 1;
+      case R_CONV_OUT: *ne=dim*dim; return 1;
+      case R_CONV_W: *ne=3u*dim; *rl=3u*dim; return 1;
+    }
+    return 0;
+  }
+  if(m->arch==ARCH_QWEN35){
+    switch(s->role){
+      case R_ATTN_QKV: *ne=conv_dim*dim; return 1;
+      case R_ATTN_GATE: *ne=inner*dim; return 1;
+      case R_SSM_ALPHA: case R_SSM_BETA: *ne=nv*dim; return 1;
+      case R_SSM_A: case R_SSM_DT: *ne=nv; *rl=nv; return 1;
+      case R_SSM_NORM: *ne=inner/nv; *rl=inner/nv; return 1;
+      case R_SSM_OUT: *ne=dim*inner; *rl=inner; return 1;
+      case R_SSM_CONV: *ne=conv_dim*(u64)c->ssm_d_conv; *rl=*ne; return 1;
+    }
+  }
+  return 0;
+}
+/* Un .g2bx no confiable (la app Android descarga de URLs arbitrarias) no debe
+ * poder hacer leer al forward fuera de su slot: nbytes >= lo que se leerá. */
+static int validate_slots(const Model *m){
+  for(u32 i=0;i<m->n_slots;i++){
+    const Slot *s=&m->slots[i];
+    if(s->role>=R_COUNT) continue;
+    if(s->layer!=0xFFFF && s->layer>=m->c.n_layers) continue;
+    if(s->off%4){ /* layout ALIGN64; kernels leen u16/f32 alineados */
+      fprintf(stderr,"model: slot %u misaligned offset %llu\n",i,(unsigned long long)s->off);
+      return -1;
+    }
+    u64 ne=0, rl=0;
+    if(!slot_need(m,s,&ne,&rl)) continue;
+    u64 bs=ggml_block_size(s->type);
+    if(!rl || rl%bs || ne%rl){
+      fprintf(stderr,"model: slot %u (role %u L%u type %u): row %llu not a multiple of block %llu\n",
+        i,s->role,s->layer,s->type,(unsigned long long)rl,(unsigned long long)bs);
+      return -1;
+    }
+    if(s->role==R_SSM_CONV && s->type!=T_F32){ /* forward_hybrid lo lee como f32 crudo */
+      fprintf(stderr,"model: slot %u ssm_conv1d must be F32 (type %u)\n",i,s->type); return -1;
+    }
+    u64 need=(ne/bs)*ggml_type_bytes(s->type);
+    if((u64)s->nbytes<need){
+      fprintf(stderr,"model: slot %u (role %u L%u) has %u bytes, geometry needs %llu\n",
+        i,s->role,s->layer,s->nbytes,(unsigned long long)need);
+      return -1;
+    }
+  }
+  return 0;
 }
 
 /* KV cache en Q8_0 (34 B / 32 elems) vs F32 (128 B / 32 elems): ~3.76x menos RAM */
@@ -136,11 +225,12 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   G2bxHeader h;
   int hrc=g2bx_read_header(f,&h);
   if(hrc==-2){ fprintf(stderr,"model: unsupported G2BX version %u\n",h.ver); return -1; }
-  if(hrc==-3){ fprintf(stderr,"model: checksum mismatch (file corrupt or truncated)\n"); return -1; }
-  if(hrc){ fprintf(stderr,"model: not G2BX\n"); return -1; }
+  if(hrc==-3){ fprintf(stderr,"model: checksum mismatch (file corrupt or truncated)\n"); g2bx_header_free(&h); return -1; }
+  if(hrc){ fprintf(stderr,"model: not G2BX\n"); g2bx_header_free(&h); return -1; }
   m->arch=h.arch; m->flags=h.flags; m->c=h.cfg;
   m->n_slots=h.n_slots; m->slots=h.slots; /* adopta el array */
   i64 header_end=(i64)h.data_start;
+  u64 file_size=h.file_size;
   memset(&h,0,sizeof h);
 
   u64 max_end=0;
@@ -150,10 +240,18 @@ static int load_header_body(FILE *f, Model *m, const char *path){
     u64 e=off+nb;
     if(e>max_end) max_end=e;
   }
+  if(max_end>UINT64_MAX-63){ fprintf(stderr,"model: slot offsets overflow\n"); return -1; }
   u64 aligned_end=ALIGN64(max_end);
   m->data_size=(size_t)aligned_end;
 
   if(header_end < 0) return -1;
+  /* sin esto, header_end+data_size puede envolver y "caber" en el mmap */
+  if((u64)m->data_size!=aligned_end || aligned_end>(u64)SIZE_MAX-(u64)header_end){
+    fprintf(stderr,"model: weight blob too large\n"); return -1;
+  }
+  if((u64)header_end+aligned_end>file_size){ /* ni mmap ni malloc+fread pueden cubrirlo */
+    fprintf(stderr,"model: truncated (blob ends past EOF)\n"); return -1;
+  }
 
   int used_mmap = 0;
   { /* blob de pesos por mmap (page cache evictable); fallback malloc+fread */
@@ -173,7 +271,9 @@ static int load_header_body(FILE *f, Model *m, const char *path){
     m->use_mmap=0;
     m->data=malloc(m->data_size);
     m->own_data=1;
-    if(!m->data || fread(m->data,1,m->data_size,f)!=m->data_size){
+    /* g2bx_read_header deja el cursor indefinido (en v3, al final por el CRC) */
+    if(!m->data || os_fseek(f,header_end,SEEK_SET)
+       || fread(m->data,1,m->data_size,f)!=m->data_size){
       fprintf(stderr,"model: truncated\n"); return -1;
     }
   }
@@ -195,15 +295,40 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   }
   if(m->c.head_dim<=0) m->c.head_dim=m->c.dim/m->c.n_heads;
   if(m->c.head_dim<=0){ fprintf(stderr,"model: invalid head_dim\n"); return -1; }
+  /* Topes de cordura: los forwards hacen aritmética i32 (dim*3, hid*2,
+   * n_heads*ctx...). Sin ellos una cfg maliciosa desborda y reserva de menos. */
+  if(m->c.dim>(1<<16) || m->c.hidden_dim>(1<<20) || m->c.n_heads>1024
+     || m->c.n_kv_heads>1024 || m->c.head_dim>1024 || m->c.vocab>(1<<22)
+     || m->c.seq_len>(1<<20)
+     || (m->arch==ARCH_QWEN35 && (m->c.ssm_inner>(1<<20) || m->c.ssm_d_state>4096
+         || m->c.ssm_n_group>1024 || m->c.ssm_d_conv>64))){
+    fprintf(stderr,"model: geometry out of supported range (dim=%d hid=%d heads=%d hd=%d vocab=%d ctx=%d)\n",
+      m->c.dim,m->c.hidden_dim,m->c.n_heads,m->c.head_dim,m->c.vocab,m->c.seq_len);
+    return -1;
+  }
   if(m->c.head_dim % 32){
     m->no_kv_q8=1; /* el slice por head no cae en bloque Q8 */
     fprintf(stderr,"model: head_dim=%d not a multiple of 32 - forcing F32 KV cache\n",m->c.head_dim);
   }
-  if(m->arch==ARCH_QWEN35 && m->c.fa_interval>0){
+  if(m->arch==ARCH_QWEN35){
+    if(m->c.fa_interval<=0){ /* forward_hybrid hace (L+1)%fa_interval */
+      fprintf(stderr,"model: qwen35 fa_interval=%d invalido\n",m->c.fa_interval); return -1;
+    }
     /* los arrays beta_v/g_v/dtb/av del forward son f32[HY_NV_MAX] en stack */
+    if(m->c.ssm_inner<=0 || m->c.ssm_d_state<=0 || m->c.ssm_n_group<=0 || m->c.ssm_d_conv<2){
+      fprintf(stderr,"model: qwen35 ssm params invalid (inner=%d d_state=%d groups=%d d_conv=%d)\n",
+        m->c.ssm_inner,m->c.ssm_d_state,m->c.ssm_n_group,m->c.ssm_d_conv);
+      return -1;
+    }
     if(m->c.ssm_dt_rank>HY_NV_MAX || m->c.ssm_dt_rank<=0){
       fprintf(stderr,"model: qwen35 ssm_dt_rank=%d fuera de rango [1..%d]\n",
         m->c.ssm_dt_rank,HY_NV_MAX);
+      return -1;
+    }
+    if((i64)m->c.n_heads*m->c.head_dim > 2*(i64)m->c.ssm_inner){
+      /* forward_hybrid escribe Q (nq) sobre z|gdno (2*inner) */
+      fprintf(stderr,"model: qwen35 n_heads*head_dim=%d > 2*ssm_inner=%d (no soportado)\n",
+        m->c.n_heads*m->c.head_dim,2*m->c.ssm_inner);
       return -1;
     }
     if(m->c.ssm_inner % m->c.ssm_dt_rank){
@@ -214,6 +339,9 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   }
 
   build_index(m);
+  if(!m->ix_global || !m->ix_layer){ fprintf(stderr,"model: OOM in slot index\n"); return -1; }
+  for(i32 L=0;L<m->c.n_layers;L++) if(!m->ix_layer[L]){ fprintf(stderr,"model: OOM in slot index\n"); return -1; }
+  if(validate_slots(m)) return -1;
   if(model_set_ctx(m, m->c.seq_len)){
     fprintf(stderr,"model: OOM in runtime buffers\n"); return -1;
   }
@@ -264,6 +392,7 @@ void model_free(Model *m){
    for(int L=0; L<m->c.n_layers; L++){ free(m->loraA_q[L]); free(m->loraB_q[L]); free(m->loraA_v[L]); free(m->loraB_v[L]); free(m->loraA_gate[L]); free(m->loraB_gate[L]); free(m->loraM_q[L]); free(m->loraM_v[L]); free(m->loraM_gate[L]); free(m->galore_m[L]); free(m->galore_v[L]); }
    free(m->loraA_q); free(m->loraB_q); free(m->loraA_v); free(m->loraB_v); free(m->loraA_gate); free(m->loraB_gate); free(m->loraM_q); free(m->loraM_v); free(m->loraM_gate); free(m->galore_m); free(m->galore_v);
   }
+  free(m->skip_layer); m->skip_layer=NULL;
   free(m->swap_path); m->swap_path=NULL;
   free(m->src_path); m->src_path=NULL;
   if(m->tok){ tok_free(m->tok); free(m->tok); m->tok=NULL; }

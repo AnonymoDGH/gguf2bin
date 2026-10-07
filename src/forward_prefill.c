@@ -13,6 +13,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
   if(m->arch==ARCH_LFM2 || m->arch==ARCH_QWEN35) return 1; /* recurrente: camino secuencial */
   ModelCfg *c=&m->c;
   if(!m->pf_B || !m->pf_x){ return 1; /* sin buffers: que el llamador use el secuencial */ }
+  if(m->lora_r) return 1; /* los kernels _b no aplican LoRA: el secuencial sí */
   i32 dim=c->dim, hid=c->hidden_dim, hd=c->head_dim;
   i32 nq=c->n_heads*hd, nkv=c->n_kv_heads*hd, ctx=m->ctx;
   i32 group=c->n_heads/c->n_kv_heads; if(group<1) group=1;

@@ -66,8 +66,13 @@ static int wr_cfg(FILE *o, const ModelCfg *c){
   return 0;
 }
 static int rd_slot(FILE *f, Slot *s){
-  return rd_u8(f,&s->role) || rd_u16(f,&s->layer) || rd_u8(f,&s->type)
-      || rd_u32(f,&s->nbytes) || rd_u64(f,&s->off) ? -1 : 0;
+  /* Slot es #pragma pack(1): &s->layer etc. están desalineados (UB; falla en
+   * ARM estricto). Leer a locales y asignar por valor. */
+  u8 role, type; u16 layer; u32 nbytes; u64 off;
+  if(rd_u8(f,&role) || rd_u16(f,&layer) || rd_u8(f,&type)
+     || rd_u32(f,&nbytes) || rd_u64(f,&off)) return -1;
+  s->role=role; s->layer=layer; s->type=type; s->nbytes=nbytes; s->off=off;
+  return 0;
 }
 static int wr_slot(FILE *o, const Slot *s){
   return wr_u8(o,s->role) || wr_u16(o,s->layer) || wr_u8(o,s->type)
@@ -134,7 +139,7 @@ int g2bx_read_header(FILE *f, G2bxHeader *h){
       else if(h->slots[i].type==T_Q4_VVC_LEGACY) h->slots[i].type=T_Q4_VVC;
     }
   }
-  { u64 pos=0; if(os_ftell(f,&pos)) return -1; h->data_start=pos; }
+  { u64 pos=0; if(os_ftell(f,&pos)){ g2bx_header_free(h); return -1; } h->data_start=pos; }
   u64 max_end=0, wsum=0;
   for(u32 i=0;i<h->n_slots;i++){
     u64 off=h->slots[i].off, nb=h->slots[i].nbytes;
@@ -145,7 +150,7 @@ int g2bx_read_header(FILE *f, G2bxHeader *h){
   h->blob_end=h->data_start+ALIGN64(max_end);
   { u64 cur=0;
     if(os_ftell(f,&cur) || os_fseek(f,0,SEEK_END) || os_ftell(f,&h->file_size)
-       || os_fseek(f,(i64)cur,SEEK_SET)) return -1; }
+       || os_fseek(f,(i64)cur,SEEK_SET)){ g2bx_header_free(h); return -1; } }
   if(h->file_size > h->blob_end+20){
     if(os_fseek(f,(i64)h->blob_end,SEEK_SET)==0){
       u32 nv=0,nm=0; i32 b=-1,e=-1,u=0;
@@ -156,7 +161,7 @@ int g2bx_read_header(FILE *f, G2bxHeader *h){
       }
     }
   }
-  if(ver>=3 && g2bx_verify_footer(f)) return -3;
+  if(ver>=3 && g2bx_verify_footer(f)){ g2bx_header_free(h); return -3; }
   return 0;
 }
 void g2bx_header_free(G2bxHeader *h){

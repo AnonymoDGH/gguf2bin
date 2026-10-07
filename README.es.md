@@ -143,6 +143,16 @@ docs/G2BX_SPEC.md    spec del formato · docs/RESEARCH.md  notas + roadmap
 <details>
 <summary><b>📜 Historial de cambios</b></summary>
 
+#### v5.1.1 — correcciones de revisión
+- **CI en verde** (rojo desde la Fase 3): `strdup`/`fseeko`/`ftello`/`clock_gettime` quedaban sin declarar con `-std=c99`; en Linux x86-64 el puntero truncado de `strdup` tumbaba `make test` y `ftello` truncaba offsets >2 GB. También: YAML del job fuzz, `fmemopen`, `copy` de MinGW bajo `sh` de MSYS2, includes de CMake, flags AVX2 en el job de sanitizers.
+- **Tokenizer**: `u2b[289]` desbordaba y los bytes 0x7F–0xA0/0xAD se decodificaban mal (€, à, emojis).
+- **Kernels Q4_0S_PSY** (decode y batched) leían los nibbles desplazados 2 bytes: la fila PSY de la tabla mide un kernel roto, no el formato.
+- **qwen35**: `wo` de atención usaba `n=dim` en vez de `n_heads*head_dim`. El estado recurrente de **LFM2/qwen35** no se reiniciaba en `pos 0`.
+- **LoRA** ignorado en el prefill batcheado; **pack --prune** corrompía `ffn_down` con F16/F32/Q8_0; tensores >4 GB rechazados.
+- **Endurecimiento ante .g2bx no confiables** (la app Android descarga de cualquier URL): `nbytes` de cada slot validado contra la geometría, topes contra overflow i32, comprobaciones de EOF/offsets.
+- **JNI Android**: use-after-free entre `freeModel` y `generate`; tokens emitidos como caracteres UTF-8 completos.
+- **Chat LFM2**: ya no se inyecta el bloque `<think></think>` vacío (convención de Qwen3) que hacía que LFM2.5 empezara "corrigiéndose". **ppl**: las ventanas 2+ reabren con BOS como llama.cpp.
+
 #### v5.0 — G2BX v3: formato con CRC + namespace de tipos propio
 - **Footer CRC32**: todo `.g2bx` nuevo termina en `[crc32 de lo previo][magic]`; el loader lo verifica al abrir y rechaza truncados/corruptos con mensaje claro. Nuevo comando `verify` (header + slots + tipos + geometría + CRC sin cargar pesos).
 - **Tipos internos en 0x80+**: Q4_0S/PSY/VVC dejan los IDs 25/26/27 (hoy I16/I32/I64 en ggml — colisión real). Archivos v1/v2 se normalizan al cargar.

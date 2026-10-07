@@ -39,7 +39,8 @@ role:u8 | layer:u16 | type:u8 | nbytes:u32 | off:u64
 ```
 
 - `role`: enum R_* (0=tok_embd …; ver `g2b.h`). `layer=0xFFFF` = global (no por capa).
-- `off`: relativo al inicio del blob. `nbytes`: u32 (límite documentado: 4 GB por tensor; el packer debe rechazar más — pendiente, §7).
+- `off`: relativo al inicio del blob (múltiplo de 4; el writer usa ALIGN64). `nbytes`: u32 (límite: 4 GB por tensor; el packer rechaza tensores mayores desde v5.1.1).
+- El loader exige `nbytes` ≥ lo que el forward leerá según rol y geometría (§2); un slot más corto se rechaza.
 - El blob puede tener huecos (padding a 64 B); el reader no los interpreta.
 
 ## 4. Tipos de tensor (`type:u8`)
@@ -93,5 +94,4 @@ El packer/synth desde v5.0 solo escriben v3.
 
 - `chat_template`: campo string tras los slots (antes del blob) reservado;
   sin motor de plantillas no se almacena nada (Fase 8).
-- Validación packer de tensor >4 GB (hoy truncaría el u32 en silencio).
 - `g2bx diff a b` (tooling futuro; `verify` ya existe).
