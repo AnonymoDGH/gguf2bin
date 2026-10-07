@@ -18,11 +18,14 @@ if (!(Test-Path $ks)) {
 
 # 1) núcleo C -> libgguf2bin.so (arm64)
 $cc = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android24-clang.cmd"
-$srcs = @("$root\..\src\l1_gguf.c","$root\..\src\l2_codec.c","$root\..\src\l3_math.c",
-          "$root\..\src\l4_gbin.c","$root\..\src\l5_model.c","$root\..\src\l6_token.c",
-          "$root\jni\g2b_jni.c","$root\jni\vk_stub.c")
+# núcleo sin CLI/API/Vulkan (vk_stub.c sustituye a l7_vulkan.c). l5_model.c se
+# partió en la Fase 3 (model/kv/forward_*); g2b.h vive en src/internal.
+$core = "l1_gguf","l2_codec","l3_math","l4_gbin","model","kv","forward_dense",
+        "forward_lfm2","forward_hybrid","forward_prefill","l6_token","l8_lora",
+        "os_mm","g2bx_io"
+$srcs = @($core | ForEach-Object { "$root\..\src\$_.c" }) + @("$root\jni\g2b_jni.c","$root\jni\vk_stub.c")
 & $cc -O3 -ffast-math -fPIC -shared -o "$out\libgguf2bin.so" `
-  -I"$root\..\include" @srcs -lm -fopenmp -static-openmp
+  -I"$root\..\include" -I"$root\..\src" -I"$root\..\src\internal" @srcs -lm -fopenmp -static-openmp
 if ($LASTEXITCODE) { throw "fallo compilación nativa" }
 
 # 2) recursos + manifest -> apk base (+ R.java)

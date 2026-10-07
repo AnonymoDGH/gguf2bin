@@ -120,8 +120,10 @@ static int cmd_run(int argc, char **argv){
       char *s=argv[++i], *tok;
       for(tok=strtok(s,","); tok&&np<1024; tok=strtok(NULL,",")) prompt[np++]=atoi(tok);
     } else {
+      /* separador solo ENTRE palabras: un espacio final cambia el último
+       * token ("is" → "is", "Ġ") y empeora la continuación */
+      if(text[0]) strncat(text," ",sizeof(text)-1-strlen(text));
       strncat(text,argv[i],sizeof(text)-1-strlen(text));
-      strncat(text," ",sizeof(text)-1-strlen(text));
     }
   }
   g2b_config cfg;

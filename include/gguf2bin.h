@@ -38,7 +38,7 @@ typedef enum {
 } g2b_error;
 
 const char *g2b_strerror(g2b_error e);
-const char *g2b_version(void);              /* "4.9.0" (de version.h) */
+const char *g2b_version(void);              /* p. ej. "5.1.2" (de version.h) */
 
 /* ── apertura / introspección ─────────────────────────────────────────── */
 typedef struct {

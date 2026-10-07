@@ -58,6 +58,31 @@ static jstring utf8_to_jstring(JNIEnv *env, const char *s, size_t n){
   free(u);
   return r;
 }
+/* jstring → UTF-8 estándar (malloc). GetStringUTFChars da Modified UTF-8:
+ * un emoji llega como par surrogate de 6 bytes (CESU-8) y el tokenizer ve
+ * bytes inválidos en vez del carácter. Se codifica desde UTF-16. */
+static char *jstring_to_utf8(JNIEnv *env, jstring js){
+  if (!js) return NULL;
+  jsize n = (*env)->GetStringLength(env, js);
+  const jchar *u = (*env)->GetStringChars(env, js, NULL);
+  if (!u) return NULL;
+  char *o = (char *)malloc((size_t)n * 3 + 1); /* ≤3 B por unidad UTF-16 */
+  if (!o) { (*env)->ReleaseStringChars(env, js, u); return NULL; }
+  size_t k = 0;
+  for (jsize i = 0; i < n; i++) {
+    unsigned cp = u[i];
+    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF) {
+      cp = 0x10000 + ((cp - 0xD800) << 10) + (u[i+1] - 0xDC00); i++;
+    } else if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD; /* surrogate suelto */
+    if (cp < 0x80) o[k++] = (char)cp;
+    else if (cp < 0x800) { o[k++] = (char)(0xC0 | (cp >> 6)); o[k++] = (char)(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) { o[k++] = (char)(0xE0 | (cp >> 12)); o[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); o[k++] = (char)(0x80 | (cp & 0x3F)); }
+    else { o[k++] = (char)(0xF0 | (cp >> 18)); o[k++] = (char)(0x80 | ((cp >> 12) & 0x3F)); o[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); o[k++] = (char)(0x80 | (cp & 0x3F)); }
+  }
+  o[k] = 0;
+  (*env)->ReleaseStringChars(env, js, u);
+  return o;
+}
 /* Longitud del prefijo sin una secuencia UTF-8 incompleta al final. */
 static size_t utf8_complete_prefix(const char *s, size_t n){
   size_t back = 0;
@@ -130,12 +155,12 @@ static i32 sample_topk(f32 *logits, i32 n, f32 temp, int top_k,
 
 JNIEXPORT jlong JNICALL
 Java_com_gguf2bin_app_Native_loadModel(JNIEnv *env, jclass cl, jstring path, jint ctx) {
-  const char *p = (*env)->GetStringUTFChars(env, path, NULL);
+  char *p = jstring_to_utf8(env, path);
   if (!p) return 0;
   JModel *j = (JModel *)calloc(1, sizeof(JModel));
-  if (!j) { (*env)->ReleaseStringUTFChars(env, path, p); return 0; }
+  if (!j) { free(p); return 0; }
   int rc = model_load_g2bx(p, &j->m);
-  (*env)->ReleaseStringUTFChars(env, path, p);
+  free(p);
   if (rc) { free(j); return 0; }
   model_set_ctx(&j->m, ctx > 0 ? ctx : DEFAULT_CTX);
   j->live = 1;
@@ -192,10 +217,10 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
   j->busy = 1;
   Model *m = &j->m;
 
-  const char *ptext = (*env)->GetStringUTFChars(env, prompt, NULL);
+  char *ptext = jstring_to_utf8(env, prompt);
   i32 *ids = NULL;
-  i32 nt = tok_encode(m->tok, (char *)ptext, &ids);
-  (*env)->ReleaseStringUTFChars(env, prompt, ptext);
+  i32 nt = ptext ? tok_encode(m->tok, ptext, &ids) : 0;
+  free(ptext);
   if (nt <= 0) { free(ids); gen_end_locked(j); pthread_mutex_unlock(&g_mu); return NULL; }
 
   if (m->tok->bos >= 0 && ids[0] != m->tok->bos) {
@@ -286,7 +311,9 @@ Java_com_gguf2bin_app_Native_generate(JNIEnv *env, jclass cl, jlong ptr,
     pthread_mutex_unlock(&g_mu);
   }
   pthread_mutex_lock(&g_mu); gen_end_locked(j); pthread_mutex_unlock(&g_mu);
-  result = utf8_to_jstring(env, out, len);
+  /* sin la cola incompleta (corte a mitad de carácter por maxTokens): el
+   * resultado coincide con lo emitido por streaming y no mete U+FFFD al historial */
+  result = utf8_to_jstring(env, out, utf8_complete_prefix(out, len));
 
   free(out); free(logits); free(ids); free(recent);
   return result;
