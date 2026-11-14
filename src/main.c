@@ -15,8 +15,9 @@
 /* Construye g2b_config desde los flags comunes run/chat/bench/ppl. */
 static void fill_cfg(g2b_config *c, i32 ctx, int nthr, int q8kv, int f32kv,
                      u64 max_ram_mb, const char *swap, int fast,
-                     int gpu, const char *lora, u64 seed){
+                     int gpu, const char *lora, u64 seed, int head_cand){
   memset(c,0,sizeof *c);
+  c->head_cand=head_cand;
   c->ctx=ctx; c->threads=nthr;
   c->q8_kv = f32kv?0:(q8kv?1:-1);
   c->max_ram_bytes=max_ram_mb<<20;
@@ -32,7 +33,9 @@ static void run_print_tok(const char *piece, void *ud){
 static void usage(const char *a0){
   fprintf(stderr,
     "gguf2bin2 - GGUF -> G2BX (own format) -> Qwen3/Llama/LFM2 inference v" G2B_VERSION "\n\n"
-    "  %s pack   <model.gguf> <out.g2bx> [--q4] [--prune F]\n"
+    "  %s pack   <model.gguf> <out.g2bx> [--q4] [--fast-head [R]] [--prune F] [--calib text.txt]\n"
+    "                     --fast-head  head screening: ~1/3 of the head bytes per token\n"
+    "                                  (rotated head, R=256 screening columns; +disk, same RAM)\n"
     "                     --prune 0.5  prune 50%% of the FFN by importance\n"
     "                     (MoE effect: fewer weights/token -> more tok/s)\n"
     "  %s info   <model.g2bx|gguf>\n"
@@ -58,7 +61,9 @@ static void usage(const char *a0){
     "      --swap [PATH]      file-backed KV cache; without PATH uses D:\\ if present, else system temp\n"
     "      --fast             everything out: high priority, max threads, no swap\n"
     "      --threads N        OpenMP core count (default: all)\n"
-     "      --drop N           skip the N least-influential blocks (ShortGPT)\n\n"
+     "      --drop N           skip the N least-influential blocks (ShortGPT)\n"
+    "      --head-cand N      fast-head models: candidates rescored exactly (default 4096)\n"
+    "      --no-fast-head     fast-head models: use the full head instead\n\n"
     "bench extras:\n"
     "      --prefill N        measure prompt-processing tok/s (no logits)\n\n"
     "Examples:\n"
@@ -78,9 +83,13 @@ static int cmd_pack(int argc, char **argv){
     else if(!strcmp(argv[i],"--q4vvc")||!strcmp(argv[i],"--vvc")){ o.downquant=1; o.out_quant=3; }
     else if(!strcmp(argv[i],"--prune")&&i+1<argc) o.prune=(float)atof(argv[++i]);
     else if(!strcmp(argv[i],"--calib")&&i+1<argc) o.calib_path=argv[++i];
+    else if(!strcmp(argv[i],"--fast-head")){
+      o.head_screen=256; /* opcional: nº de columnas de criba */
+      if(i+1<argc && argv[i+1][0]>='0' && argv[i+1][0]<='9') o.head_screen=atoi(argv[++i]);
+    }
   }
   g2b_error e=g2b_pack(argv[2],argv[3],&o);
-  if(e==G2B_ERR_CONTEXT) fprintf(stderr,"pack: --prune must be in (0,0.9)\n");
+  if(e==G2B_ERR_CONTEXT) fprintf(stderr,"pack: --prune must be in (0,0.9) and --fast-head a multiple of 32\n");
   else if(e!=G2B_OK) fprintf(stderr,"pack: %s\n",g2b_strerror(e));
   return e?1:0;
 }
@@ -127,7 +136,7 @@ static int cmd_run(int argc, char **argv){
     }
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,cyber,co.seed);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,cyber,co.seed,co.head_cand);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"run: cannot open %s\n",path); return 1; }
   if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
@@ -176,7 +185,7 @@ static int cmd_ppl(int argc, char **argv){
     else if(!strcmp(argv[i],"--cyber")&&i+1<argc) cyber=argv[++i];
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,0,0,cyber,0);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,0,0,cyber,0,co.head_cand);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"ppl: cannot open %s\n",path); return 1; }
   if(co.ndrop>0) g2b_autodrop(s,co.ndrop);
@@ -229,7 +238,7 @@ static int cmd_chat(int argc, char **argv){
     else if(!strcmp(argv[i],"--no-system")){ no_sys=1; sys_txt=NULL; }
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,co.seed);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,co.seed,co.head_cand);
   g2b_session *s=NULL;
   if(g2b_open(path,&cfg,&s)!=G2B_OK){ fprintf(stderr,"chat: cannot open %s\n",path); return 1; }
   if(co.seed) fprintf(stderr,"seed=%llu\n",(unsigned long long)co.seed);
@@ -274,7 +283,7 @@ static int cmd_bench(int argc, char **argv){
     else if(!strcmp(argv[i],"--json")) json=1;
   }
   g2b_config cfg;
-  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,0);
+  fill_cfg(&cfg,co.ctx,co.threads,co.q8kv,co.f32kv,co.max_ram_mb,co.swap,co.fast,co.gpu,NULL,0,co.head_cand);
   g2b_session *s=NULL;
   if(g2b_open(argv[2],&cfg,&s)!=G2B_OK){ fprintf(stderr,"bench: cannot open %s\n",argv[2]); return 1; }
   if(co.ndrop>0) g2b_autodrop(s,co.ndrop);

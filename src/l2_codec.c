@@ -800,6 +800,33 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d){
     Q4_ROW_HSUM(accA,out+i);
   }
 }
+/* Filas sueltas Q4_0 (criba del head): misma aritmética y orden de suma que
+   matmul_q4_0 sobre cada fila → bit-idéntico a recalcular esa fila entera. */
+static void q4_0_idx_avx2(f32 *out, const f32 *x, const u8 *w, i32 n, const i32 *idx, i32 nidx){
+  i32 nb = n/32;
+  const __m128i mask0F = _mm_set1_epi8(0x0F);
+  const __m256i onei8 = _mm256_set1_epi8(1);
+  const __m256i ones16 = _mm256_set1_epi16(1);
+  const __m256i eight16 = _mm256_set1_epi16(8);
+  u8 *q8; f32 *q8d;
+  if(q4_decode_setup(n,nidx,out,x,&q8,&q8d)) return;
+  const size_t rs=(size_t)nb*18;
+  #pragma omp parallel for schedule(static) if((i64)n*nidx > OMP_MM_MIN)
+  for(i32 k=0;k<nidx;k++){
+    const u8 *pa=w+(size_t)idx[k]*rs;
+    if(k+2<nidx){ /* filas dispersas: el prefetcher hardware no las ve venir */
+      const char *nx=(const char*)(w+(size_t)idx[k+2]*rs);
+      for(size_t o=0;o<rs;o+=64) _mm_prefetch(nx+o,_MM_HINT_T0);
+    }
+    __m256 acc=_mm256_setzero_ps();
+    for(i32 b=0;b<nb;b++){
+      const u8 *p_=pa+(size_t)b*18;
+      Q4_BLK_ACC(p_,0,_mm256_loadu_si256((const __m256i*)(q8+(size_t)b*32)),
+                 (f32)half_to_float(*(const u16*)p_)*q8d[b],acc);
+    }
+    Q4_ROW_HSUM(acc,out+k);
+  }
+}
 /* Un bloque Q4 x G tokens (G<=4): expande nibbles UNA vez, dot por token.
    Bit-idéntico al barrido por token: mismo orden de bloques y fmadds por salida. */
 #define Q4_B_BLK(pa,b,qa0,qa1,qa2,qa3,qd0,qd1,qd2,qd3,G,a0,a1,a2,a3) do{ \
@@ -1413,6 +1440,26 @@ void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0,
       f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
       out[i]=s;
     } }
+}
+void matmul_q_idx(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, const i32 *idx, i32 nidx){
+  if(!out||!x||!w||!idx||n<=0||nidx<=0) return;
+#if defined(__AVX2__) && !defined(DISABLE_AVX2)
+  if(type==T_Q4_0){ q4_0_idx_avx2(out,x,w,n,idx,nidx); return; }
+#endif
+  /* resto de tipos: dequant de la fila + dot */
+  u64 st=row_stride(type,n);
+  int use_omp = ((i64)n*nidx > OMP_MM_MIN);
+  #pragma omp parallel if(use_omp)
+  {
+    f32 *tmp = fallback_buf((size_t)n);
+    #pragma omp for schedule(static)
+    for(i32 k=0;k<nidx;k++){
+      if(!tmp){ out[k]=0.f; continue; }
+      gguf_dequant(type,(u8*)(w+(size_t)idx[k]*st),tmp,(u64)n);
+      f32 s=0; for(i32 j=0;j<n;j++) s+=tmp[j]*x[j];
+      out[k]=s;
+    }
+  }
 }
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B){
   if(!out || !x || !w || n<=0 || d<=0 || B<=0){

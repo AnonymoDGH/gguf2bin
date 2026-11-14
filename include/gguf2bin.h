@@ -52,6 +52,9 @@ typedef struct {
   int      gpu;             /* 1 = dual-band CPU+GPU del head (si Vulkan ayuda) */
   const char *lora_path;    /* NULL = sin adaptador */
   uint64_t seed;            /* 0 = no determinista */
+  /* v5.2 añade head_cand (layout cambia: recompilar clientes). */
+  int      head_cand;       /* criba del head (modelos --fast-head): 0 = por defecto (4096
+                               candidatos), <0 = desactivar, >0 = nº de candidatos */
 } g2b_config;
 
 typedef struct {
@@ -126,6 +129,8 @@ typedef struct {
   const char *calib_path;  /* NULL = proxy |g·u| (rápido) o corpus embebido */
   void (*on_progress)(float pct, const char *phase, void *ud); /* reservado Fase 2 */
   void *ud;
+  int head_screen;      /* criba del head: 0 = no; >0 = columnas de criba (múltiplo de 32,
+                           256 recomendado). Calibra con calib_path o el corpus embebido. */
 } g2b_pack_opts;
 g2b_error g2b_pack(const char *gguf, const char *out, const g2b_pack_opts *o);
 

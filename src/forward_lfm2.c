@@ -155,11 +155,7 @@ void forward_lfm2(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   if(dbg&&pos<4){ f32 s=0,mx=-1e30f,mn=1e30f; for(i32 i=0;i<dim;i++){ s+=x[i]*x[i]; if(x[i]>mx)mx=x[i]; if(x[i]<mn)mn=x[i]; }
     fprintf(stderr,"[dbg] final |x|=%g max=%g min=%g\n",sqrtf(s),mx,mn); }
   if(!want_logits || !logits) return;
-  Slot *out=slot_get(m,R_OUTPUT,-1);
-  if(!out) out=emb;
-  if(require_slot(out,"output",-1)) return;
-  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return;
-  matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
+  if(model_head(m,x,logits,row)) return;
   if(dbg&&pos<4){ f32 mx=-1e30f,mn=1e30f; i32 b1=0,b2=0,b3=0;
     for(i32 i=0;i<c->vocab;i++){ if(logits[i]>mx){mx=logits[i];b3=b2;b2=b1;b1=i;} if(logits[i]<mn)mn=logits[i]; }
     fprintf(stderr,"[dbg] logits min=%g max=%g top=%d,%d,%d (%g %g %g)\n",mn,mx,b1,b2,b3,logits[b1],logits[b2],logits[b3]); }

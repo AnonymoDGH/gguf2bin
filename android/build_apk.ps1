@@ -22,7 +22,7 @@ $cc = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android24-
 # partió en la Fase 3 (model/kv/forward_*); g2b.h vive en src/internal.
 $core = "l1_gguf","l2_codec","l3_math","l4_gbin","model","kv","forward_dense",
         "forward_lfm2","forward_hybrid","forward_prefill","l6_token","l8_lora",
-        "os_mm","g2bx_io"
+        "os_mm","g2bx_io","headscreen"
 $srcs = @($core | ForEach-Object { "$root\..\src\$_.c" }) + @("$root\jni\g2b_jni.c","$root\jni\vk_stub.c")
 & $cc -O3 -ffast-math -fPIC -shared -o "$out\libgguf2bin.so" `
   -I"$root\..\include" -I"$root\..\src" -I"$root\..\src\internal" @srcs -lm -fopenmp -static-openmp

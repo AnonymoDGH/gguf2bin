@@ -9,10 +9,10 @@ LDFLAGS ?= -lm -fopenmp
 CORE = src/l1_gguf.c src/l2_codec.c src/l3_math.c src/l4_gbin.c \
        src/model.c src/kv.c src/forward_dense.c src/forward_lfm2.c \
        src/forward_hybrid.c src/forward_prefill.c \
-       src/l6_token.c src/l7_vulkan.c src/l8_lora.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c
+       src/l6_token.c src/l7_vulkan.c src/l8_lora.c src/g2b_api.c src/os_mm.c src/sampler.c src/opts.c src/g2bx_io.c src/headscreen.c
 SRC = $(CORE) src/main.c
 HDRS = include/gguf2bin.h include/version.h src/internal/g2b.h src/internal/g2bx_io.h \
-       src/internal/opts.h src/internal/os_mm.h src/internal/sampler.h
+       src/internal/opts.h src/internal/os_mm.h src/internal/sampler.h src/internal/calib_corpus.h
 BIN = gguf2bin2
 ifeq ($(OS),Windows_NT)
   EXE = $(BIN).exe

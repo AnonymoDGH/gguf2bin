@@ -25,6 +25,7 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+#include "internal/calib_corpus.h"
 
 /* ── sesión ─────────────────────────────────────────────────────────── */
 struct g2b_session {
@@ -187,7 +188,12 @@ g2b_error g2b_open(const char *path, const g2b_config *cfg, g2b_session **out){
   if(s->cfg.lora_path && cyber_load_lora(&s->m,s->cfg.lora_path)){
     model_free(&s->m); free(s->src_path); free(s); return G2B_ERR_FORMAT;
   }
-  if(s->cfg.gpu && !vk_dual_start(&s->m,path))
+  if(s->cfg.head_cand && s->m.hs.T && model_set_head_cand(&s->m,s->cfg.head_cand)){
+    model_free(&s->m); free(s->src_path); free(s); return G2B_ERR_OOM;
+  }
+  if(s->cfg.gpu && s->m.hs_on)
+    fprintf(stderr,"[gpu] head screening is active - dual band not used\n");
+  else if(s->cfg.gpu && !vk_dual_start(&s->m,path))
     fprintf(stderr,"[gpu] continuing CPU-only\n");
   { const char *sw = s->cfg.fast ? NULL : s->cfg.swap_path;
     int q8 = s->cfg.q8_kv>0, f32 = s->cfg.q8_kv==0;
@@ -630,46 +636,113 @@ g2b_error g2b_ppl(g2b_session *s, const char *text, int max_tokens,
 }
 
 /* ── pack ─────────────────────────────────────────────────────────── */
+/* Calibración de la criba del head: E[h hᵀ] de los estados finales sobre un
+ * texto, en ventanas cortas (con BOS si el modelo lo define). malloc; NULL si falla. */
+static double *head_calibrate(Model *m, const char *text, i32 *ntok){
+  enum { WIN=256 };
+  const i32 dim=m->c.dim; *ntok=0;
+  i32 *ids=NULL; i32 nt=tok_encode(m->tok,text,&ids);
+  if(nt<=0){ free(ids); return NULL; }
+  const i32 bos=m->tok->bos; const int off=(bos>=0 && bos<m->c.vocab)?1:0;
+  double *C=calloc((size_t)dim*(size_t)dim,sizeof(double));
+  if(!C || model_set_ctx(m,WIN+off) || m->ctx<=off){ free(C); free(ids); return NULL; }
+  const i32 win=m->ctx-off; i32 n=0;
+  for(i32 base=0; base<nt; base+=win){
+    i32 pos=0;
+    if(off) model_forward_ex(m,bos,pos++,NULL,0);
+    for(i32 p=base; p<base+win && p<nt; p++){
+      if(ids[p]<0 || ids[p]>=m->c.vocab) continue;
+      model_forward_ex(m,ids[p],pos++,NULL,0);
+      const f32 *h=model_final_state(m);
+      #pragma omp parallel for schedule(static)
+      for(i32 a=0;a<dim;a++){
+        const double ha=(double)h[a]; double *ca=C+(size_t)a*dim;
+        for(i32 b=0;b<=a;b++) ca[b]+=ha*(double)h[b];
+      }
+      n++;
+    }
+    fprintf(stderr,"\rfast-head: calibrating %d/%d tokens",n,nt);
+  }
+  fprintf(stderr,"\n");
+  free(ids);
+  if(n<dim/8){ free(C); return NULL; }
+  for(i32 a=0;a<dim;a++) for(i32 b=0;b<=a;b++){
+    double v=C[(size_t)a*dim+b]/n; C[(size_t)a*dim+b]=v; C[(size_t)b*dim+a]=v;
+  }
+  *ntok=n;
+  return C;
+}
+static char *calib_corpus_text(void){
+  size_t n=0;
+  for(size_t i=0;i<sizeof G2B_CALIB_CORPUS/sizeof G2B_CALIB_CORPUS[0];i++) n+=strlen(G2B_CALIB_CORPUS[i]);
+  char *t=malloc(n+1); if(!t) return NULL;
+  size_t o=0;
+  for(size_t i=0;i<sizeof G2B_CALIB_CORPUS/sizeof G2B_CALIB_CORPUS[0];i++){
+    size_t l=strlen(G2B_CALIB_CORPUS[i]); memcpy(t+o,G2B_CALIB_CORPUS[i],l); o+=l;
+  }
+  t[o]=0;
+  return t;
+}
+
 g2b_error g2b_pack(const char *gguf, const char *out, const g2b_pack_opts *o){
   if(!gguf || !out) return G2B_ERR_IO;
-  int downq4=0; float prune=0.f; const char *calib=NULL; int oq=0;
-  if(o){ downq4=o->downquant; prune=o->prune; calib=o->calib_path; oq=o->out_quant; }
+  int downq4=0; float prune=0.f; const char *calib=NULL; int oq=0; int head_r=0;
+  if(o){ downq4=o->downquant; prune=o->prune; calib=o->calib_path; oq=o->out_quant; head_r=o->head_screen; }
   if(prune>0.f && (prune<=0.001f||prune>=0.9f)) return G2B_ERR_CONTEXT;
+  if(head_r<0 || head_r%32) return G2B_ERR_CONTEXT;
   /* flags globales del packer: fijar los tres en cada llamada (antes un pack
    * Q4_0S dejaba Q4_0S activo para los siguientes g2b_pack del proceso) */
   g2bx_set_q4s(oq==1); g2bx_set_q4s_psy(oq==2); g2bx_set_q4vvc(oq==3);
-  if(prune<=0.f) return g2bx_pack_prune(gguf,out,downq4,0.f)?G2B_ERR_FORMAT:G2B_OK;
-  /* dos fases: pack completo -> calibrar -> repack podado */
+  if(prune<=0.f && head_r<=0) return g2bx_pack_prune(gguf,out,downq4,0.f)?G2B_ERR_FORMAT:G2B_OK;
+  /* dos fases: pack completo -> calibrar (poda y/o criba del head) -> repack */
   char tmp[1280];
   snprintf(tmp,sizeof tmp,"%s.calib.g2bx",out);
   fprintf(stderr,"pack: phase 1/2 - full pack for calibration\n");
   if(g2bx_pack_prune(gguf,tmp,downq4,0.f)){ remove(tmp); return G2B_ERR_FORMAT; }
   Model m; memset(&m,0,sizeof m);
   if(model_load_g2bx(tmp,&m)){ remove(tmp); return G2B_ERR_FORMAT; }
-  i32 maxtok=768; i32 ctx=m.c.seq_len>0?(m.c.seq_len<maxtok?m.c.seq_len:maxtok):maxtok;
-  model_set_ctx(&m,ctx);
   char *text=NULL; size_t len=0;
   if(calib){
     if(!os_read_file(calib,&text,&len)){ if(!len){ free(text); text=NULL; len=0; } }
     else fprintf(stderr,"pack: cannot open %s - using embedded corpus\n",calib);
   }
-  if(!text || len==0){ text=(char*)G2B_DEFAULT_CALIB; len=strlen(G2B_DEFAULT_CALIB); }
   g2b_error rc=G2B_OK;
-  if(!m.tok){ fprintf(stderr,"pack: model has no tokenizer - cannot --prune\n"); rc=G2B_ERR_FORMAT; }
-  else {
-    i32 *ids=NULL; i32 nt=tok_encode(m.tok,text,&ids);
-    if(nt>ctx) nt=ctx;
-    if(nt<64){ fprintf(stderr,"pack: insufficient calibration (%d tokens)\n",nt); free(ids); rc=G2B_ERR_FORMAT; }
+  PackExtras ex; memset(&ex,0,sizeof ex);
+  double *cov=NULL;
+  if(!m.tok){ fprintf(stderr,"pack: model has no tokenizer - cannot calibrate (--prune / --fast-head)\n"); rc=G2B_ERR_FORMAT; }
+  /* criba del head: primero (model_set_ctx de la poda borra sus propias stats, no esto) */
+  if(rc==G2B_OK && head_r>0){
+    char *corpus = text ? NULL : calib_corpus_text();
+    i32 nt=0;
+    cov=head_calibrate(&m, text?text:(corpus?corpus:""), &nt);
+    free(corpus);
+    if(!cov){ fprintf(stderr,"pack: fast-head calibration failed (too little text?)\n"); rc=G2B_ERR_FORMAT; }
     else {
-      fprintf(stderr,"pack: calibrating on %d tokens...\n",nt);
-      int ok = (model_collect_stats(&m,ids,nt)==0 && m.ffn_stats!=NULL);
-      free(ids);
-      if(!ok) rc=G2B_ERR_FORMAT;
-      else if(g2bx_pack_prune_scores(gguf,out,downq4,prune,m.ffn_stats)) rc=G2B_ERR_FORMAT;
-      model_free_stats(&m);
+      if(nt<2*m.c.dim)
+        fprintf(stderr,"pack: warning: only %d calibration tokens for dim=%d; fast-head recall will suffer (use --calib with >= %d tokens of varied text)\n",nt,m.c.dim,2*m.c.dim);
+      ex.head_cov=cov; ex.head_r=head_r;
     }
   }
-  if(text!=(char*)G2B_DEFAULT_CALIB) free(text);
+  if(rc==G2B_OK && prune>0.f){
+    i32 maxtok=768; i32 ctx=m.c.seq_len>0?(m.c.seq_len<maxtok?m.c.seq_len:maxtok):maxtok;
+    model_set_ctx(&m,ctx);
+    const char *ptext = text ? text : G2B_DEFAULT_CALIB;
+    i32 *ids=NULL; i32 nt=tok_encode(m.tok,ptext,&ids);
+    if(nt>ctx) nt=ctx;
+    if(nt<64){ fprintf(stderr,"pack: insufficient calibration (%d tokens)\n",nt); rc=G2B_ERR_FORMAT; }
+    else {
+      fprintf(stderr,"pack: calibrating on %d tokens...\n",nt);
+      if(model_collect_stats(&m,ids,nt)==0 && m.ffn_stats!=NULL) ex.ffn_calib=m.ffn_stats;
+      else rc=G2B_ERR_FORMAT;
+    }
+    free(ids);
+  }
+  if(rc==G2B_OK){
+    fprintf(stderr,"pack: phase 2/2 - final pack\n");
+    if(g2bx_pack_full(gguf,out,downq4,prune,&ex)) rc=G2B_ERR_FORMAT;
+  }
+  model_free_stats(&m);
+  free(cov); free(text);
   model_free(&m);
   remove(tmp);
   return rc;

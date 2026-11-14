@@ -161,9 +161,36 @@ static u64 weight_row_len(u8 role, const ModelCfg *c){
     default: return (u64)c->dim;
   }
 }
-static void quant_block_q4_0(const f32 *x, u8 *dst){
-  f32 amax=0; for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax) amax=a; } f32 d=amax/7.0f; if(d<=0) d=1e-9f; u16 sd=f32_to_half(d); memcpy(dst,&sd,2);
-  for(int j=0;j<16;j++){ int q0=(int)lroundf(x[j]/d)+8; int q1=(int)lroundf(x[j+16]/d)+8; if(q0<0)q0=0; else if(q0>15)q0=15; if(q1<0)q1=0; else if(q1>15)q1=15; dst[2+j]=(u8)(q0|(q1<<4)); }
+/* Q4_0 con búsqueda de escala (v5.2). Antes: d = amax/7 y redondeo, que deja
+ * sin usar el nivel -8 y fija la escala por el valor extremo del bloque. Ahora
+ * se prueban varias escalas alrededor de max/-8 (el elemento de mayor |x| cae
+ * en -8, rango completo [-8,7]) y, para los niveles de cada una, la escala de
+ * mínimos cuadrados d = Σx·l/Σl²; gana la de menor error cuadrático. Mismo
+ * formato y mismos kernels: solo cambia qué bytes se escriben. */
+void q4_0_quant_block(const f32 *x, u8 *dst){
+  f32 amax=0, vmax=0;
+  for(int i=0;i<32;i++){ f32 a=fabsf(x[i]); if(a>amax){ amax=a; vmax=x[i]; } }
+  if(!(amax>0.f) || !(amax<3e38f)){ u16 z=f32_to_half(1e-9f); memcpy(dst,&z,2); memset(dst+2,0x88,16); return; }
+  i8 best_l[32]; f32 best_d=amax/7.f; double best_err=1e300;
+  for(int is=-12; is<=6; is++){
+    const f32 iscale=-(8.f+0.25f*(f32)is)/vmax;
+    i8 l[32]; double sxl=0, sl2=0, sx2=0;
+    for(int i=0;i<32;i++){
+      int q=(int)lroundf(iscale*x[i]); if(q<-8) q=-8; else if(q>7) q=7;
+      l[i]=(i8)q; sxl+=(double)x[i]*q; sl2+=(double)q*q; sx2+=(double)x[i]*x[i];
+    }
+    if(!(sl2>0)) continue;
+    /* la escala se guarda en fp16: evaluar el error con la que de verdad se usará */
+    f32 d=half_to_float(f32_to_half((f32)(sxl/sl2)));
+    if(!(d!=0.f)) continue;
+    double err=sx2-2.0*d*sxl+(double)d*d*sl2;
+    if(err<best_err){ best_err=err; best_d=d; memcpy(best_l,l,32); }
+  }
+  if(best_err>=1e300){ /* sin candidato válido: esquema antiguo */
+    for(int i=0;i<32;i++){ int q=(int)lroundf(x[i]/best_d); if(q<-8)q=-8; else if(q>7)q=7; best_l[i]=(i8)q; }
+  }
+  u16 sd=f32_to_half(best_d); memcpy(dst,&sd,2);
+  for(int j=0;j<16;j++) dst[2+j]=(u8)((best_l[j]+8)|((best_l[j+16]+8)<<4));
 }
 /* Q4_0S: escala fp16 UNICA por superbloque de 256 elems (130B vs 144B) */
 static u8 *convert_tensor_q4_0s(const u8 *src, u32 srctype, u64 ne){
@@ -231,17 +258,17 @@ static u8 *convert_tensor_q4_0(const u8 *src, u32 srctype, u64 ne){
   u64 bs = ggml_block_size(srctype); /* 1=F32/F16, 32=Q4/Q8, 256=K-quants */
   if(bs<=1){
     u64 st = ggml_type_bytes(srctype)*32;
-    f32 blk[32];
-    for(u64 b=0;b<nb;b++){ gguf_dequant(srctype,(u8*)(src+b*st),blk,32); quant_block_q4_0(blk,out+b*18); }
+    #pragma omp parallel for schedule(static)
+    for(i64 b=0;b<(i64)nb;b++){ f32 blk[32]; gguf_dequant(srctype,(u8*)(src+(u64)b*st),blk,32); q4_0_quant_block(blk,out+(u64)b*18); }
     return out;
   }
   /* bloques de bs elementos (32 o 256): dequant el bloque entero y re-cuantizar en trozos de 32 */
-  f32 blk[256];
   u64 src_bytes = ggml_type_bytes(srctype);
-  u64 d=0;
-  for(u64 sb=0; sb<ne/bs; sb++){
-    gguf_dequant(srctype,(u8*)(src+sb*src_bytes),blk,bs);
-    for(u64 j=0;j<bs;j+=32){ quant_block_q4_0(blk+j,out+d); d+=18; }
+  #pragma omp parallel for schedule(static)
+  for(i64 sb=0; sb<(i64)(ne/bs); sb++){
+    f32 blk[256];
+    gguf_dequant(srctype,(u8*)(src+(u64)sb*src_bytes),blk,bs);
+    for(u64 j=0;j<bs;j+=32) q4_0_quant_block(blk+j,out+((u64)sb*bs+j)/32*18);
   }
   return out;
 }
@@ -292,11 +319,25 @@ int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, flo
 }
 int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
                            int downq4, float prune, const f32 *calib){
+  PackExtras ex; memset(&ex,0,sizeof ex); ex.ffn_calib=calib;
+  return g2bx_pack_full(gguf_path,out_path,downq4,prune,&ex);
+}
+/* Fila del head desde el tensor GGUF original (máxima precisión disponible). */
+typedef struct { const u8 *p; u32 type; i32 dim; u64 stride; } HeadSrc;
+static int head_src_row(void *ud, i32 row, f32 *out){
+  const HeadSrc *h=ud;
+  gguf_dequant(h->type,(u8*)(h->p+(size_t)row*h->stride),out,(u64)h->dim);
+  return 0;
+}
+int g2bx_pack_full(const char *gguf_path, const char *out_path,
+                   int downq4, float prune, const PackExtras *ex){
+  const f32 *calib=ex?ex->ffn_calib:NULL;
   GGUF g; if(gguf_load(gguf_path,&g)) return -1;
   ModelCfg c; u8 arch, flags; if(read_cfg(&g,&c,&arch,&flags)){ gguf_free(&g); return -1; }
   if(!(prune>0.001f) || prune>=0.9f || c.hidden_dim<=0){ prune=0.f; }
-  Slot *slots=calloc(g.n_tensors,sizeof(Slot)); u32 ns=0;
-  u64 *ne_arr=calloc(g.n_tensors,sizeof(u64)); u8 **src_ptr=calloc(g.n_tensors,sizeof(u8*)); u32 *src_sz=calloc(g.n_tensors,sizeof(u32)); u8 **conv_ptr=calloc(g.n_tensors,sizeof(u8*));
+  const u64 cap=g.n_tensors+3; /* +3: slots R_HEAD_* de la criba */
+  Slot *slots=calloc(cap,sizeof(Slot)); u32 ns=0;
+  u64 *ne_arr=calloc(cap,sizeof(u64)); u8 **src_ptr=calloc(cap,sizeof(u8*)); u32 *src_sz=calloc(cap,sizeof(u32)); u8 **conv_ptr=calloc(cap,sizeof(u8*));
   if(!slots||!ne_arr||!src_ptr||!src_sz||!conv_ptr){
     fprintf(stderr,"g2bx: OOM\n"); free(slots); free(ne_arr); free(src_ptr); free(src_sz); free(conv_ptr); gguf_free(&g); return -1;
   }
@@ -336,6 +377,16 @@ int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
       Slot ts=slots[a]; slots[a]=slots[b]; slots[b]=ts; u8 *tp=src_ptr[a]; src_ptr[a]=src_ptr[b]; src_ptr[b]=tp; u32 tz=src_sz[a]; src_sz[a]=src_sz[b]; src_sz[b]=tz; u64 tn=ne_arr[a]; ne_arr[a]=ne_arr[b]; ne_arr[b]=tn;
     }
   }
+
+  /* head original (antes de convertir a Q4_0): fuente de la criba */
+  HeadSrc hsrc; memset(&hsrc,0,sizeof hsrc); i32 head_i=-1;
+  for(u32 i=0;i<ns;i++){
+    if(slots[i].layer!=0xFFFF) continue;
+    if(slots[i].role==R_OUTPUT){ head_i=(i32)i; break; }
+    if(slots[i].role==R_TOK_EMBD) head_i=(i32)i;
+  }
+  if(head_i>=0){ hsrc.p=src_ptr[head_i]; hsrc.type=slots[head_i].type; hsrc.dim=c.dim;
+                 hsrc.stride=row_stride(hsrc.type,c.dim); }
 
   /* ── poda FFN por capas ── */
   if(prune>0.f){
@@ -498,6 +549,35 @@ skip_prune:
       if(q4){ conv_ptr[i]=q4; src_ptr[i]=q4; slots[i].type=T_Q4_0; slots[i].nbytes=(u32)(ne_arr[i]/32*18); src_sz[i]=slots[i].nbytes; }
     }
   }
+  /* ── criba del head: T + W'' partida en criba/cola (ver headscreen.c) ── */
+  if(ex && ex->head_r>0){
+    i32 hr=ex->head_r;
+    if(head_i<0 || c.vocab<=0 || c.dim%32 || hr%32 || hr<32 || hr>=c.dim
+       || c.dim%(i32)ggml_block_size(hsrc.type) || ne_arr[head_i]<(u64)c.vocab*(u64)c.dim){
+      fprintf(stderr,"fast-head: head not eligible (dim=%d r=%d) - skipped\n",c.dim,hr);
+    } else {
+      u32 qt = slots[head_i].type==T_Q8_0 ? T_Q8_0 : T_Q4_0;
+      f32 *T=NULL; u8 *ws=NULL,*wt=NULL; u64 wsb=0,wtb=0;
+      fprintf(stderr,"fast-head: rotating %d x %d head (r=%d, %s)%s...\n",c.vocab,c.dim,hr,
+        qt==T_Q8_0?"Q8_0":"Q4_0",ex->head_cov?"":" WITHOUT calibration");
+      if(hs_build(head_src_row,&hsrc,c.vocab,c.dim,ex->head_cov,hr,qt,&T,&ws,&wsb,&wt,&wtb)){
+        fprintf(stderr,"fast-head: build failed - packing without it\n");
+      } else {
+        struct { u8 role; u8 type; u8 *p; u64 nb; } add[3]={
+          {R_HEAD_ROT,T_F32,(u8*)T,(u64)c.dim*(u64)c.dim*4u},
+          {R_HEAD_SCR,(u8)qt,ws,wsb},{R_HEAD_TAIL,(u8)qt,wt,wtb}};
+        for(int a=0;a<3;a++){
+          slots[ns].role=add[a].role; slots[ns].layer=0xFFFF; slots[ns].type=add[a].type;
+          slots[ns].nbytes=(u32)add[a].nb; src_ptr[ns]=add[a].p; src_sz[ns]=(u32)add[a].nb;
+          conv_ptr[ns]=add[a].p; ne_arr[ns]=0; ns++;
+        }
+        fprintf(stderr,"fast-head: +%.1f MB on disk; per token %.1f MB -> ~%.1f MB\n",
+          (double)(wsb+wtb+(u64)c.dim*c.dim*4u)/1048576.0,
+          (double)slots[head_i].nbytes/1048576.0,
+          (double)(wsb+(u64)c.dim*c.dim*4u+(u64)HS_NCAND_DEFAULT*(wtb/(u64)c.vocab))/1048576.0);
+      }
+    }
+  }
   u64 cursor=g2bx_layout_slots(slots,ns); u64 data_size=cursor;
   FILE *o=fopen(out_path,"w+b"); if(!o){ free(slots); free(src_ptr); free(src_sz); free(ne_arr); free(conv_ptr); gguf_free(&g); return -1; }
   u8 disk_flags = (u8)(flags & ~F_KV_Q8); /* F_KV_Q8 runtime, no on-disk */
@@ -526,7 +606,8 @@ int g2bx_info(const char *path){
   static const char *rn[]={"tok_embd","out_norm","output","attn_norm","attn_q","attn_k","attn_v",
     "attn_o","attn_q_norm","attn_k_norm","ffn_norm","ffn_gate","ffn_up","ffn_down",
     "attn_q_bias","attn_k_bias","attn_v_bias","embd_norm","conv_w","conv_in","conv_out",
-    "attn_qkv","attn_gate","ssm_a","ssm_dt","ssm_conv1d","ssm_alpha","ssm_beta","ssm_norm","ssm_out"};
+    "attn_qkv","attn_gate","ssm_a","ssm_dt","ssm_conv1d","ssm_alpha","ssm_beta","ssm_norm","ssm_out",
+    "head_rot","head_scr","head_tail"};
   u64 total=0; for(u32 i=0;i<ns;i++){ const char *r=sl[i].role<R_COUNT?rn[sl[i].role]:"?"; if(sl[i].layer==0xFFFF) printf("  [%u] %-12s global type=%u %u B off=%llu\n",i,r,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); else printf("  [%u] %-12s L%-4u type=%u %u B off=%llu\n",i,r,sl[i].layer,sl[i].type,sl[i].nbytes,(unsigned long long)sl[i].off); total+=sl[i].nbytes; }
   printf("weight_bytes=%llu file_data~%llu\n",(unsigned long long)total,(unsigned long long)(ns?sl[ns-1].off+sl[ns-1].nbytes:0)); g2bx_header_free(&h); fclose(f); return 0;
 }

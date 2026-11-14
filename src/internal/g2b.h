@@ -67,6 +67,11 @@ enum {
   R_SSM_BETA,    /* proj beta [dim, dt_rank] */
   R_SSM_NORM,    /* rmsnorm gated [head_v_dim] */
   R_SSM_OUT,     /* out_proj [value_dim, dim] */
+  /* criba del head (v5.2, ver headscreen.c). Opcionales: un lector antiguo los
+   * ignora (role >= su R_COUNT) y usa el head completo de siempre. */
+  R_HEAD_ROT,    /* T [dim, dim] F32: h' = T·h */
+  R_HEAD_SCR,    /* W''[:, :r]  [vocab, r]      Q4_0/Q8_0 */
+  R_HEAD_TAIL,   /* W''[:, r:]  [vocab, dim-r]  mismo tipo */
   R_COUNT
 };
 
@@ -91,6 +96,8 @@ void matmul_q4_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
 void matmul_q8_0(f32 *out, const f32 *x, const u8 *w, i32 n, i32 d);
 void matmul_q(f32 *out, f32 *x, u8 *w, u32 type, i32 n, i32 d, f32 *row);
 void matmul_q_rows(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, i32 r0, i32 r1);
+/* out[k] = fila idx[k] · x  (filas sueltas: recálculo de candidatos de la criba) */
+void matmul_q_idx(f32 *out, const f32 *x, const u8 *w, u32 type, i32 n, const i32 *idx, i32 nidx);
 void matmul_q_b(f32 *out, const f32 *x, u8 *w, u32 type, i32 n, i32 d, i32 B); /* out[B*d] */
 void matmul(f32 *xout, f32 *x, f32 *w, i32 n, i32 d);
 /* Kernels con tipo (para la tabla de dispatch y sus tests). Solo AVX2 salvo
@@ -144,6 +151,15 @@ int g2bx_pack_ex(const char *gguf_path, const char *out_path, int downq4);
 int g2bx_pack_prune(const char *gguf_path, const char *out_path, int downq4, float prune);
 int g2bx_pack_prune_scores(const char *gguf_path, const char *out_path,
                            int downq4, float prune, const f32 *calib);
+/* Extras calibrados del pack: poda FFN y/o criba del head (cualquiera puede faltar). */
+typedef struct {
+  const f32 *ffn_calib;    /* [n_layers x hidden] de model_collect_stats, o NULL */
+  const double *head_cov;  /* [dim x dim] E[h hᵀ] de los estados finales, o NULL */
+  i32 head_r;              /* columnas de criba (múltiplo de 32); 0 = sin criba */
+} PackExtras;
+int g2bx_pack_full(const char *gguf_path, const char *out_path,
+                   int downq4, float prune, const PackExtras *ex);
+void q4_0_quant_block(const f32 *x32, u8 *dst18); /* cuantizador Q4_0 del packer */
 void g2bx_set_q4s(int v);
 void g2bx_set_q4s_psy(int v);
 void g2bx_set_q4vvc(int v);
@@ -151,6 +167,27 @@ int vk_init(void); void vkinfo_cmd(void); int vk_device_ok(void);
 const char *vk_device_name(void); u64 vk_vram(void);
 int vk_head_upload(const u8 *weights, i32 n, i32 rows); int vk_head_pipeline(void); void vk_head_run(const f32 *x, f32 *logits); int vk_head_ready(void);
 int g2bx_info(const char *path);
+
+/* ── Criba del head (headscreen.c) ── */
+typedef struct {
+  i32 dim, vocab, r, ncand, cap;  /* r columnas de criba; ncand candidatos a recalcular */
+  const f32 *T;                   /* [dim][dim]: h' = T·h */
+  const u8 *ws, *wt; u32 ts, tt;  /* criba [vocab][r] y cola [vocab][dim-r] + sus tipos */
+  f32 *hp, *tail; i32 *idx, *hist; /* scratch propio */
+} HeadScreen;
+int  hs_init(HeadScreen *hs, i32 dim, i32 vocab, i32 r, const f32 *T,
+             const u8 *ws, u32 ts, const u8 *wt, u32 tt, i32 ncand);
+void hs_free(HeadScreen *hs);
+void hs_logits(HeadScreen *hs, const f32 *x, f32 *logits);
+/* Fila i del head original en F32 (debe ser reentrante: se llama desde varios hilos). */
+typedef int (*hs_row_fn)(void *ud, i32 row, f32 *out);
+/* Calcula T y W'' cuantizada (qtype T_Q4_0|T_Q8_0). Ch = E[h hᵀ] [dim x dim] o NULL
+ * (sin calibrar: PCA simple, criba mucho peor). Salidas con malloc. 0 = ok. */
+int hs_build(hs_row_fn get, void *ud, i32 vocab, i32 dim, const double *Ch, i32 r, u32 qtype,
+             f32 **T_out, u8 **ws_out, u64 *ws_bytes, u8 **wt_out, u64 *wt_bytes);
+/* Autovalores/vectores de M simétrica n×n: w descendente, M[k*n..] = vector k. */
+int sym_eig(double *M, i32 n, double *w);
+#define HS_NCAND_DEFAULT 4096
 
 typedef struct SHash SHash;
 typedef struct {
@@ -180,6 +217,7 @@ typedef struct {
   f32 *ssm_st;                /* qwen35: estado recurrente GDN [n_recr][nv][dv][dv] */
   size_t conv_state_n, ssm_st_n; /* floats de conv_state/ssm_st (reset en pos 0) */
   /* ShortGPT: salto de bloques redundantes */
+  HeadScreen hs; u8 hs_on;    /* criba del head si el archivo trae los slots R_HEAD_* */
   u8 *skip_layer;             /* [n_layers] 1=omitir bloque completo */
   f32 *bi_pre, *bi_post;      /* scratch dim para medir Block Influence */
   f32 *bi_dot, *bi_n2, *bi_n2p; /* acumuladores [n_layers]: dot(pre,post), |post|², |pre|² */
@@ -287,6 +325,14 @@ int model_collect_stats(Model *m, const i32 *toks, i32 n);
 void model_free_stats(Model *m);
 /* ShortGPT: mide Block Influence por capa y marca las `ndrop` menos influyentes. */
 int model_autodrop(Model *m, const i32 *toks, i32 n, int ndrop);
+/* Head: logits[vocab] desde el estado final normalizado x (criba si está activa,
+ * si no dual band GPU, si no matmul completo). -1 si falta el slot de salida. */
+int model_head(Model *m, f32 *x, f32 *logits, f32 *row);
+/* Candidatos de la criba: 0 = por defecto, <0 = desactivar, >0 = nº. 0 ok. */
+int model_set_head_cand(Model *m, i32 ncand);
+/* Estado final normalizado del último forward (entrada del head). Válido tras
+ * model_forward_ex aunque want_logits=0; lo usa la calibración de la criba. */
+static inline const f32 *model_final_state(const Model *m){ return m->buf; }
 u8 *slot_ptr(Model *m, Slot *s);
 Slot *slot_get(Model *m, u8 role, i32 layer);
 int exp_synth_qwen_tiny(const char *out_path);

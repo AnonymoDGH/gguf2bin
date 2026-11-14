@@ -60,6 +60,18 @@ void fma_hd(f32 *dst, const f32 *src, f32 scale, i32 n){
 #endif
 }
 
+/* Head común a todos los forwards. */
+int model_head(Model *m, f32 *x, f32 *logits, f32 *row){
+  if(m->hs_on){ hs_logits(&m->hs,x,logits); return 0; }
+  Slot *out=slot_get(m,R_OUTPUT,-1);
+  if(!out) out=slot_get(m,R_TOK_EMBD,-1);
+  if(require_slot(out,"output",-1)) return -1;
+  /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
+  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,m->c.dim,m->c.vocab)) return 0;
+  matmul_q(logits,x,slot_ptr(m,out),out->type,m->c.dim,m->c.vocab,row);
+  return 0;
+}
+
 void model_forward(Model *m, i32 token, i32 pos, f32 *logits){
   model_forward_ex(m,token,pos,logits,1);
 }
@@ -215,11 +227,6 @@ void model_forward_ex(Model *m, i32 token, i32 pos, f32 *logits, int want_logits
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
   if(!want_logits || !logits) return; /* prefill: saltar logits vocab×dim (carísimo) */
-  Slot *out=slot_get(m,R_OUTPUT,-1);
-  if(!out) out=slot_get(m,R_TOK_EMBD,-1);
-  if(require_slot(out,"output",-1)) return;
-  /* dual band CPU+GPU: si el worker Vulkan está activo, reparte el head */
-  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return;
-  matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
+  model_head(m,x,logits,row);
 }
 

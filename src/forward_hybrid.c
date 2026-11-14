@@ -261,9 +261,5 @@ int forward_hybrid(Model *m, i32 token, i32 pos, f32 *logits, int want_logits){
   Slot *on=slot_get(m,R_OUT_NORM,-1);
   load_vec_f32(m,on,row,dim); rmsnorm(x,x,row,dim,c->eps);
   if(!want_logits||!logits) return 0;
-  Slot *out=slot_get(m,R_OUTPUT,-1);
-  if(!out) out=emb;
-  if(vk_head_dual(logits,x,slot_ptr(m,out),out->type,dim,c->vocab)) return 0;
-  matmul_q(logits,x,slot_ptr(m,out),out->type,dim,c->vocab,row);
-  return 0;
+  return model_head(m,x,logits,row);
 }

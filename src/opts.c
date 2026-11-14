@@ -18,6 +18,8 @@ int opts_common_try(OptsCommon *o, int argc, char **argv, int *i){
   else if(!strcmp(a,"--seed")&&k+1<argc) o->seed=(uint64_t)strtoull(argv[++k],NULL,10);
   else if(!strcmp(a,"--drop")&&k+1<argc) o->ndrop=atoi(argv[++k]);
   else if(!strcmp(a,"--gpu")) o->gpu=1;
+  else if(!strcmp(a,"--head-cand")&&k+1<argc){ o->head_cand=atoi(argv[++k]); if(o->head_cand<=0) o->head_cand=-1; }
+  else if(!strcmp(a,"--no-fast-head")) o->head_cand=-1;
   else return 0;
   *i=k;
   return 1;

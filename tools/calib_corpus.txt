@@ -1,0 +1,173 @@
+The river that crosses the valley has changed its course at least four times in recorded history. Each flood left a new layer of silt, and farmers learned to read those layers the way a librarian reads a catalogue. When engineers arrived in 1954 to build the first dam, they found irrigation channels older than any map of the region. The project took nine years, cost three times the original estimate, and moved two villages uphill.
+
+Photosynthesis converts light into chemical energy. Inside the chloroplast, pigments absorb photons and pass the excitation to a reaction centre, where water is split and oxygen is released. The plant stores the captured energy as sugar, which it later burns to grow roots, leaves and seeds. Without this process the atmosphere would contain almost no free oxygen.
+
+"Did you lock the door?" she asked.
+"I thought you did."
+"No, I had the bags. You had the keys."
+He patted his pockets, sighed, and walked back up the stairs. It was raining again, of course. By the time he returned she had already found a taxi and was arguing with the driver about the fastest way to the station.
+
+To reset the device, hold the power button for ten seconds until the light blinks twice. Wait for the status screen, then choose "Restore defaults" and confirm. Do not unplug the cable during the update. If the screen stays dark for more than five minutes, contact support and quote the serial number printed under the battery cover.
+
+Dear Ms. Alvarez,
+Thank you for your application for the position of data analyst. We were impressed by your experience with forecasting models and would like to invite you to an interview next Thursday at 10:30. Please bring a copy of your certificate and let us know if you need any special arrangements.
+Kind regards,
+The recruitment team
+
+Markets closed slightly higher on Tuesday after the central bank left interest rates unchanged at 4.25%. Technology shares gained 1.3%, while energy companies fell as oil dropped below $78 a barrel. Analysts expect inflation to slow in the second half of the year, although housing costs remain a concern for most households.
+
+The old lighthouse keeper counted ships out of habit. Forty years of fog and salt had taught him that the sea keeps no promises, yet every evening he climbed the one hundred and twelve steps, trimmed the lamp, and wrote the weather in a ledger nobody would ever read. That night the barometer fell faster than he had ever seen.
+
+In mathematics, a prime number is a natural number greater than 1 that has no positive divisors other than 1 and itself. The first primes are 2, 3, 5, 7, 11, 13, 17, 19, 23 and 29. There are infinitely many primes, a fact proved by Euclid around 300 BC. For example, 91 is not prime because 91 = 7 x 13, while 97 is prime.
+
+Tips for a good night's sleep: keep a regular schedule, avoid screens for an hour before bed, keep the room cool and dark, and do not drink coffee after 3 pm. If you cannot fall asleep within twenty minutes, get up and read something boring until you feel tired.
+
+La biblioteca del pueblo abrió sus puertas en 1923 con apenas trescientos libros donados por los vecinos. Hoy guarda más de cuarenta mil volúmenes, una colección de mapas antiguos y el archivo completo del periódico local. Cada jueves por la tarde, los niños de la escuela se sientan en el suelo de la sala principal para escuchar cuentos, igual que hicieron sus abuelos.
+
+—¿A qué hora sale el tren para Sevilla?
+—A las siete y cuarto, pero hoy lleva retraso.
+—¿Cuánto?
+—Unos veinte minutos, según la pantalla. Si quiere, puede esperar en la cafetería; avisan por megafonía.
+—Gracias. ¿Sabe si hay que cambiar de andén?
+—No, sale del tres, como siempre.
+
+Para preparar una tortilla de patatas se necesitan cuatro huevos, medio kilo de patatas, una cebolla, aceite de oliva y sal. Primero se pelan las patatas y se cortan en láminas finas. Después se fríen a fuego lento hasta que estén tiernas, se escurren y se mezclan con los huevos batidos. Por último, se cuaja la mezcla en la sartén unos tres minutos por cada lado.
+
+El cambio climático no afecta a todas las regiones por igual. Mientras algunas zonas costeras sufren inundaciones cada vez más frecuentes, otras padecen sequías prolongadas que arruinan las cosechas. Los científicos advierten de que la temperatura media del planeta ha subido 1,2 grados desde la época preindustrial y que cada décima adicional aumenta el riesgo de fenómenos extremos.
+
+Estimado cliente: le informamos de que su pedido número 48213 ha sido enviado y llegará en un plazo de tres a cinco días laborables. Puede consultar el estado del envío en nuestra página web. Si tiene alguna duda, no dude en escribirnos. Un saludo cordial.
+
+Había una vez un zorro que vivía al borde del bosque. No era el más rápido ni el más fuerte, pero sabía escuchar. Una mañana de invierno oyó crujir el hielo del estanque y comprendió, antes que nadie, que la primavera llegaría pronto aquel año.
+
+Le musée ouvre tous les jours de neuf heures à dix-huit heures, sauf le lundi. L'entrée est gratuite pour les enfants de moins de douze ans. Une visite guidée commence à quatorze heures devant l'escalier principal.
+
+Der Zug nach München fährt heute von Gleis sieben ab. Bitte beachten Sie die Durchsagen am Bahnsteig. Wegen Bauarbeiten kann es zu Verspätungen von bis zu fünfzehn Minuten kommen.
+
+A previsão do tempo para amanhã indica céu nublado com possibilidade de chuva à tarde. As temperaturas vão variar entre dezoito e vinte e quatro graus. Recomenda-se levar um guarda-chuva.
+
+La ricetta della nonna prevede farina, uova, un pizzico di sale e molta pazienza. L'impasto deve riposare almeno mezz'ora prima di essere steso con il mattarello.
+
+今天的会议改到下午三点，请大家准时参加。会议的主要内容是讨论下个季度的销售计划和新产品的发布时间。如果有问题，可以提前发邮件给我。
+
+東京の天気は晴れで、最高気温は二十五度です。午後から風が強くなるでしょう。お出かけの際は帽子を忘れないでください。
+
+오늘 저녁에 같이 식사할 수 있을까요? 회사 근처에 새로 생긴 식당이 맛있다고 들었습니다. 일곱 시쯤 어떠세요?
+
+Сегодня утром шёл сильный дождь, поэтому автобус опоздал на двадцать минут. Мы успели на работу только к девяти часам.
+
+مرحبا، كيف حالك اليوم؟ أتمنى أن تكون بخير. سنلتقي غدا في الساعة الخامسة أمام المكتبة.
+
+आज मौसम बहुत अच्छा है। हम शाम को पार्क में घूमने जाएंगे और फिर साथ में खाना खाएंगे।
+
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct node { int value; struct node *next; } node_t;
+
+static node_t *push(node_t *head, int value) {
+    node_t *n = malloc(sizeof *n);
+    if (!n) return head;
+    n->value = value;
+    n->next = head;
+    return n;
+}
+
+int main(int argc, char **argv) {
+    node_t *list = NULL;
+    for (int i = 0; i < 10; i++) list = push(list, i * i);
+    for (node_t *p = list; p != NULL; p = p->next) printf("%d\n", p->value);
+    return 0;
+}
+
+import json
+from collections import Counter
+
+def word_count(path):
+    """Return the ten most common words in a text file."""
+    with open(path, encoding="utf-8") as f:
+        words = f.read().lower().split()
+    counts = Counter(w.strip(".,;:!?") for w in words)
+    return counts.most_common(10)
+
+if __name__ == "__main__":
+    for word, n in word_count("notes.txt"):
+        print(f"{word:>12} {n}")
+
+const users = await fetch("/api/users").then((res) => res.json());
+const active = users.filter((u) => u.active && u.age >= 18);
+document.querySelector("#count").textContent = `${active.length} active users`;
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
+SELECT c.name, COUNT(o.id) AS orders, SUM(o.total) AS revenue
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.created_at >= '2024-01-01'
+GROUP BY c.name
+HAVING SUM(o.total) > 1000
+ORDER BY revenue DESC
+LIMIT 20;
+
+{"id": 1042, "name": "Sensor A", "enabled": true, "tags": ["outdoor", "battery"], "location": {"lat": 40.4168, "lon": -3.7038}, "readings": [21.5, 21.7, 22.1], "error": null}
+
+#!/bin/sh
+set -e
+for f in *.log; do
+  if [ -s "$f" ]; then gzip -9 "$f" && echo "compressed $f"; fi
+done
+grep -c "ERROR" server.log.gz || true
+
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Contact</title>
+<style>body { font-family: sans-serif; margin: 2rem; } .btn { padding: 8px 16px; }</style></head>
+<body><h1>Contact us</h1><form action="/send" method="post"><input type="email" name="email" required><button class="btn">Send</button></form></body>
+</html>
+
+# Release notes
+
+## Version 2.4.1
+- Fixed a crash when opening files larger than 2 GB.
+- Improved startup time by about 30%.
+- Added a `--verbose` flag to the command-line tool.
+
+| Plan | Price | Storage |
+|------|-------|---------|
+| Free | $0 | 5 GB |
+| Pro | $9.99 | 200 GB |
+
+User: What is the capital of Australia?
+Assistant: The capital of Australia is Canberra. Sydney is the largest city, but Canberra was chosen as the capital in 1908.
+
+User: Can you explain what an API is in simple terms?
+Assistant: An API is a set of rules that lets one program talk to another. Think of it as a waiter in a restaurant: you tell the waiter what you want, the waiter carries the request to the kitchen, and then brings back your food. You never need to know how the kitchen works.
+
+User: Traduce al inglés: "Mañana tengo una reunión importante."
+Assistant: "I have an important meeting tomorrow."
+
+User: What is 17 times 23?
+Assistant: 17 x 23 = 391. One way to see it: 17 x 20 = 340 and 17 x 3 = 51, and 340 + 51 = 391.
+
+User: Give me three ideas for a birthday present for my father, who likes fishing.
+Assistant: Here are three ideas:
+1. A waterproof tackle box with adjustable compartments.
+2. A good pair of polarized sunglasses, which cut the glare on the water.
+3. A day trip with a local fishing guide.
+
+User: ¿Cuál es la diferencia entre "por" y "para"?
+Assistant: En general, "por" indica causa, medio o duración ("lo hice por ti", "viajamos por tren", "estudié por dos horas"), mientras que "para" indica finalidad, destino o plazo ("es para ti", "salgo para Madrid", "lo necesito para el lunes").
+
+User: Write a haiku about autumn.
+Assistant: Red leaves on the path,
+the wind forgets where it goes,
+smoke from a far roof.
+
+User: Why is the sky blue?
+Assistant: Sunlight contains all colours. When it enters the atmosphere, air molecules scatter short wavelengths such as blue much more strongly than long wavelengths such as red. That scattered blue light reaches your eyes from every direction, so the sky looks blue. At sunset the light travels through more air, most of the blue is scattered away, and the sky turns orange and red.
+
+User: Summarize this in one sentence: The committee met for six hours, reviewed fourteen proposals, rejected nine, and asked for changes to the other five before the next meeting in March.
+Assistant: After a six-hour meeting the committee rejected nine of fourteen proposals and requested revisions to the remaining five before March.
+
+The meeting is scheduled for 14 March 2025 at 09:00 in room B-204. Call +34 912 345 678 or write to info@example.org for details. The package weighs 2.5 kg and measures 30 x 20 x 15 cm. Total: 1,249.50 EUR (VAT 21% included). See https://www.example.com/docs/setup?lang=en#step-3 for instructions. Flight IB3170 departs at 18:45 and lands at 21:10 local time. The password must contain at least 12 characters, one number and one symbol.

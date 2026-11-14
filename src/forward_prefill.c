@@ -159,10 +159,7 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
       Slot *on=slot_get(m,R_OUT_NORM,-1);
       load_vec_f32(m,on,row,dim);
       rmsnorm(m->buf,x+(size_t)(B-1)*dim,row,dim,c->eps);
-      Slot *out=slot_get(m,R_OUTPUT,-1);
-      if(!out) out=emb;
-      if(!vk_head_dual(last_logits,m->buf,slot_ptr(m,out),out->type,dim,c->vocab))
-        matmul_q(last_logits,m->buf,slot_ptr(m,out),out->type,dim,c->vocab,row);
+      if(model_head(m,m->buf,last_logits,row)) return -1;
       last_logits=NULL;
     }
     pos0+=B; toks+=B; n-=B;

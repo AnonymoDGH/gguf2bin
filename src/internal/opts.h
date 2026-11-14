@@ -10,6 +10,7 @@
 
 typedef struct {
   int ctx, threads, q8kv, f32kv, fast, ndrop, gpu;
+  int head_cand;         /* criba del head: 0 por defecto, <0 off, >0 candidatos */
   uint64_t max_ram_mb;   /* MB (fill_cfg la pasa a bytes) */
   uint64_t seed;
   const char *swap;      /* "@" = ruta por defecto del sistema */

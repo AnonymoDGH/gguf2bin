@@ -120,6 +120,45 @@ static int validate_slots(const Model *m){
   return 0;
 }
 
+/* Criba del head: si el archivo trae los tres slots R_HEAD_*, validarlos contra
+ * la geometría y activarla. Slots a medias o incoherentes → archivo rechazado. */
+static int head_screen_attach(Model *m){
+  Slot *sr=m->ix_global[R_HEAD_ROT], *ss=m->ix_global[R_HEAD_SCR], *st=m->ix_global[R_HEAD_TAIL];
+  if(!sr && !ss && !st) return 0;
+  const u64 dim=(u64)m->c.dim, voc=(u64)m->c.vocab;
+  if(!sr || !ss || !st){ fprintf(stderr,"model: head-screen slots incomplete\n"); return -1; }
+  if(sr->type!=T_F32 || (u64)sr->nbytes<dim*dim*4u
+     || (ss->type!=T_Q4_0 && ss->type!=T_Q8_0) || st->type!=ss->type){
+    fprintf(stderr,"model: head-screen slot types/sizes invalid\n"); return -1;
+  }
+  const u64 bb=ggml_type_bytes(ss->type);            /* bytes por bloque de 32 */
+  if((u64)ss->nbytes%voc || ((u64)ss->nbytes/voc)%bb){
+    fprintf(stderr,"model: head-screen screen slot is not vocab x r\n"); return -1;
+  }
+  const u64 r=((u64)ss->nbytes/voc)/bb*32u;
+  if(r<32u || r>=dim || (dim-r)%32u || (u64)st->nbytes<voc*((dim-r)/32u)*bb){
+    fprintf(stderr,"model: head-screen geometry invalid (r=%llu dim=%llu)\n",
+      (unsigned long long)r,(unsigned long long)dim);
+    return -1;
+  }
+  if(!slot_ptr(m,sr) || !slot_ptr(m,ss) || !slot_ptr(m,st)) return -1;
+  if(hs_init(&m->hs,m->c.dim,m->c.vocab,(i32)r,(const f32*)slot_ptr(m,sr),
+             slot_ptr(m,ss),ss->type,slot_ptr(m,st),st->type,HS_NCAND_DEFAULT)){
+    fprintf(stderr,"model: OOM in head-screen buffers\n"); return -1;
+  }
+  m->hs_on=1;
+  return 0;
+}
+int model_set_head_cand(Model *m, i32 ncand){
+  if(!m || !m->hs.T) return -1;              /* el modelo no trae criba */
+  if(ncand<0){ m->hs_on=0; return 0; }
+  if(ncand==0) ncand=HS_NCAND_DEFAULT;
+  HeadScreen h;
+  if(hs_init(&h,m->hs.dim,m->hs.vocab,m->hs.r,m->hs.T,m->hs.ws,m->hs.ts,m->hs.wt,m->hs.tt,ncand)) return -1;
+  hs_free(&m->hs); m->hs=h; m->hs_on=1;
+  return 0;
+}
+
 /* KV cache en Q8_0 (34 B / 32 elems) vs F32 (128 B / 32 elems): ~3.76x menos RAM */
 /* Ajusta el contexto efectivo (y el modo de KV cache) del runtime. */
 int model_set_ctx(Model *m, i32 ctx){
@@ -342,6 +381,7 @@ static int load_header_body(FILE *f, Model *m, const char *path){
   if(!m->ix_global || !m->ix_layer){ fprintf(stderr,"model: OOM in slot index\n"); return -1; }
   for(i32 L=0;L<m->c.n_layers;L++) if(!m->ix_layer[L]){ fprintf(stderr,"model: OOM in slot index\n"); return -1; }
   if(validate_slots(m)) return -1;
+  if(head_screen_attach(m)) return -1;
   if(model_set_ctx(m, m->c.seq_len)){
     fprintf(stderr,"model: OOM in runtime buffers\n"); return -1;
   }
@@ -366,6 +406,9 @@ int model_load_g2bx(const char *path, Model *m){
   fprintf(stderr,"model: G2BX arch=%u dim=%d L=%d hd=%d vocab=%d flags=0x%02x mmap=%s\n",
     m->arch,m->c.dim,m->c.n_layers,m->c.head_dim,m->c.vocab,m->flags,
     m->use_mmap?"yes":"no");
+  if(m->hs_on)
+    fprintf(stderr,"model: head screening on (r=%d of %d columns, %d candidates)\n",
+      m->hs.r,m->c.dim,m->hs.ncand);
   return 0;
 }
 
@@ -393,6 +436,7 @@ void model_free(Model *m){
    free(m->loraA_q); free(m->loraB_q); free(m->loraA_v); free(m->loraB_v); free(m->loraA_gate); free(m->loraB_gate); free(m->loraM_q); free(m->loraM_v); free(m->loraM_gate); free(m->galore_m); free(m->galore_v);
   }
   free(m->skip_layer); m->skip_layer=NULL;
+  hs_free(&m->hs); m->hs_on=0;
   free(m->swap_path); m->swap_path=NULL;
   free(m->src_path); m->src_path=NULL;
   if(m->tok){ tok_free(m->tok); free(m->tok); m->tok=NULL; }
