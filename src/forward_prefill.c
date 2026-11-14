@@ -155,6 +155,11 @@ int model_prefill(Model *m, const i32 *toks, i32 n, i32 pos0, f32 *last_logits){
       }
     }
 
+    if(m->pf_states){ /* estado final normalizado de CADA posición (lectura para la memoria) */
+      Slot *on=slot_get(m,R_OUT_NORM,-1);
+      load_vec_f32(m,on,row,dim);
+      for(i32 t=0;t<B;t++) rmsnorm(m->pf_states+(size_t)(pos0+t)*dim,x+(size_t)t*dim,row,dim,c->eps);
+    }
     if(last_logits && n-B==0){ /* solo el último chunk contiene el token final */
       Slot *on=slot_get(m,R_OUT_NORM,-1);
       load_vec_f32(m,on,row,dim);

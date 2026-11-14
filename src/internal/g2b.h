@@ -235,6 +235,7 @@ typedef struct {
   i32 pf_B;
   f32 *pf_pool; /* base única del pool (lo único que se libera) */
   f32 *pf_x, *pf_xb, *pf_hb, *pf_hb2, *pf_q, *pf_k, *pf_v, *pf_att;
+  f32 *pf_states; /* opcional, del llamador: [ctx][dim]; el prefill deja ahí el estado final de cada posición */
   Tokenizer *tok;
   u8 own_data;
   u8 use_mmap; /* runtime only; not part of on-disk flags */
